@@ -1,8 +1,35 @@
 #!/usr/bin/env python
 # coding: utf-8
+
+# +
+import numpy as np
+import pandas as pd
+import os
+import scipy as sp
+from functools import partial
+from sklearn import metrics
+
+import torch
+from fastai import *
+from fastai.core import *
+from fastai.basic_data import *
+from fastai.basic_train import *
+from fastai.torch_core import *
+
+from fastai.vision import *
+from fastai.vision.learner import create_head, cnn_config, num_features_model
+
+from IPython.core.debugger import set_trace
+
+# -
+
+# +
+
 # !apt install tree -y
 
 # !tree -d ../input/
+
+# # todo: check how accuracy is calculated, or just submit and check ans...
 
 # !nvidia-smi
 
@@ -18,16 +45,17 @@ import subprocess
 import os
 import gc
 
-USER_NAME='pengyu'
+USER_NAME = 'pengyu'
 TFRECORD_FILDATA_FLAG = '.tf_record_saved'
 GDRIVE_DOWNLOAD_DEST = '/proc/driver/nvidia'
+
 
 def run_commans(commands, timeout=30):
     for c in commands.splitlines():
         c = c.strip()
         if c.startswith("#"):
             continue
-        stdout, stderr = run_process(c,timeout)
+        stdout, stderr = run_process(c, timeout)
         if stdout:
             print(stdout.decode('utf-8'))
         if stderr:
@@ -35,7 +63,8 @@ def run_commans(commands, timeout=30):
             print("stop at command {}, as it reports error in stderr".format(c))
             break
 
-def run_process(process_str,timeout):
+
+def run_process(process_str, timeout):
     print("{}:{}$ ".format(USER_NAME, os.getcwd())+process_str)
     MyOut = subprocess.Popen(process_str,
                              shell=True,
@@ -205,45 +234,14 @@ else:
 
 
 # +
-!./gdrive download 1aDPlZSOCm66f3XkFZH9xEwqHoyLd5eoC
 
-# !mkdir models ; mv *pth models
+# !./gdrive download 1aDPlZSOCm66f3XkFZH9xEwqHoyLd5eoC ; mkdir models ; mv *pth models
 
 # !pip install torchsnooper
 # -
 
-! ( wget http://23.105.212.181:8000/fastai-custom-loss.py -O fastai-custom-loss.py ) 2>&1 
-
-
-
 # +
 # # %load fastai-custom-loss.py
-import torch
-from fastai import *
-from fastai.vision import *
-from fastai.vision.learner import create_head, cnn_config, num_features_model, create_head
-from fastai.callbacks.hooks import model_sizes, hook_outputs, dummy_eval, Hook, _hook_inner
-from fastai.vision.models.unet import _get_sfs_idxs, UnetBlock
-from fastai.data_block import CategoryList
-import pandas as pd
-import matplotlib.pyplot as plt
-from IPython.core.debugger import set_trace
-
-from fastai.core import *
-from fastai.basic_data import *
-from fastai.basic_train import *
-from fastai.torch_core import *
-
-import numpy as np
-import pandas as pd
-import os
-import scipy as sp
-from functools import partial
-from sklearn import metrics
-from collections import Counter
-import json
-
-
 
 # Making pretrained weights work without needing to find the default filename
 if not os.path.exists('/tmp/.cache/torch/checkpoints/'):
@@ -314,7 +312,7 @@ def prepare_train_dev_data():
 
 # +
 pre_prepare_train_dev_data()
-df= prepare_train_dev_data()
+df = prepare_train_dev_data()
 
 # This is actually very small. The [previous competition](https://kaggle.com/c/diabetic-retinopathy-detection) had ~35k images, which supports the idea that pretraining on that dataset may be quite beneficial.
 
@@ -339,8 +337,6 @@ print(width, height)
 
 # The images are actually quite big. We will resize to a much smaller size.
 
-
-
 bs = 64  # smaller batch size is better for training, but may take longer
 sz = 224  # transformed to this size
 
@@ -360,18 +356,12 @@ sz = 224  # transformed to this size
 #     531         for ds,n in zip(self.lists, ['train','valid','test']): ds.process(xp, yp, name=n)
 class CategoryWithScoreProcessor(MultiCategoryProcessor):
     "`PreProcessor` that create `classes` from `ds.items` and handle the mapping."
-    def __init__(self, ds:ItemList, one_hot:bool=False):
+    def __init__(self, ds: ItemList, one_hot: bool=False):
         super(CategoryWithScoreProcessor, self).__init__(ds, one_hot)
 
-    def process_one(self,item):
+    def process_one(self, item):
         if self.one_hot or isinstance(item, EmptyLabel): return item
-
-        #coarse_res = item[:-1]
-        #score = item[-1]
-        #NPDR_res = [1 if i+1==score else 0 for i in range(3)]  # fine classification for NPDR
         return item.astype(np.int)
-
-        #return torch.tensor(np.append(np.concatenate([coarse_res,NPDR_res]),score), device='cuda:0')
 
     def generate_classes(self, items):
         "Generate classes from `items` by taking the sorted unique values."
@@ -817,4 +807,3 @@ sample_df.head()
 
 sample_df.to_csv('submission.csv', index=False)
 # -
-

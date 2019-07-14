@@ -8,7 +8,8 @@ import pandas as pd
 
 # but it is recommended to first set `fast_commit` to false first and the kernel will run with only partial data to
 # check if there is bug in the code.
-fast_commit = False
+fast_commit = True
+fast_commit_with_commit_runing_less_data = True
 
 final_submission = False  # for disable random seed setting. Also, we can use all training data (no validation) for
                           # final submission
@@ -17,18 +18,19 @@ try:
     sub = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
 except:
     sub = pd.read_csv('../input/sample_submission.csv')
+sub.to_csv('submission.csv', index=False)  # so we can always submit
 
 submitting_to_LB = False
 use_less_train_data = False
+
 if fast_commit:
     if len(sub) < 2000:
-        sub.to_csv('submission.csv', index=False)
-        exit()
-    else:
+        if fast_commit_with_commit_runing_less_data:
+            use_less_train_data = True
+        else:
+            exit()
+    else:  # this is real submit for leader board
         submitting_to_LB = True
-else:
-    use_less_train_data = True
-
 # -
 
 # +

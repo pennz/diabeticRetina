@@ -1,5 +1,35 @@
 #!/usr/bin/env python
 # coding: utf-8
+# +
+import pandas as pd
+# this cell is for fast submitting, refer https://www.kaggle.com/c/instant-gratification/discussion/94379#latest-546086
+# if you are sure your code is right, keep `fast_commit` to True, so after running this cell, code commission can be
+# done and you can submit the kernel for LB quickly.
+
+# but it is recommended to first set `fast_commit` to false first and the kernel will run with only partial data to
+# check if there is bug in the code.
+fast_commit = False
+
+final_submission = False  # for disable random seed setting. Also, we can use all training data (no validation) for
+                          # final submission
+
+try:
+    sub = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
+except:
+    sub = pd.read_csv('../input/sample_submission.csv')
+
+submitting_to_LB = False
+use_less_train_data = False
+if fast_commit:
+    if len(sub) < 2000:
+        sub.to_csv('submission.csv', index=False)
+        exit()
+    else:
+        submitting_to_LB = True
+else:
+    use_less_train_data = True
+
+# -
 
 # +
 import numpy as np
@@ -7,7 +37,7 @@ import pandas as pd
 import os
 import scipy as sp
 from functools import partial
-from sklearn import metrics
+from sklearn.metrics import cohen_kappa_score
 
 import torch
 from fastai import *
@@ -25,191 +55,34 @@ from IPython.core.debugger import set_trace
 # -
 
 # +
-NO_INTERNET = True
-
-# # todo: check how accuracy is calculated, or just submit and check ans...
-# # todo: for prediction, need to resize the data to the size too (need to do)
-
-# #!nvidia-smi
-
 # %reload_ext autoreload
 # %autoreload 2
-
-# #exit()
-
-# +
-import subprocess
-import os
-import gc
-
-USER_NAME = 'pengyu'
-TFRECORD_FILDATA_FLAG = '.tf_record_saved'
-GDRIVE_DOWNLOAD_DEST = '/proc/driver/nvidia'
-
-
-def run_commans(commands, timeout=30):
-    for c in commands.splitlines():
-        c = c.strip()
-        if c.startswith("#"):
-            continue
-        stdout, stderr = run_process(c, timeout)
-        if stdout:
-            print(stdout.decode('utf-8'))
-        if stderr:
-            print(stderr.decode('utf-8'))
-            print("stop at command {}, as it reports error in stderr".format(c))
-            break
-
-
-def run_process(process_str, timeout):
-    print("{}:{}$ ".format(USER_NAME, os.getcwd())+process_str)
-    MyOut = subprocess.Popen(process_str,
-                             shell=True,
-                             stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT)
-    try:
-        MyOut.wait(timeout=timeout)
-        return MyOut.communicate()
-    except subprocess.TimeoutExpired as e:
-        return None, bytes('\'{}\''.format(e), 'utf-8')
-
-def run_process_print(process_str,timeout=30):
-    stdout, stderr = run_process(process_str, timeout)
-    if stdout:
-        print(stdout.decode('utf-8'))
-    if stderr:
-        print(stderr.decode('utf-8'))
-
-def pip_install_thing():
-    to_installs = """pip install --upgrade pip
-    #pip install -q tensorflow-gpu==2.0.0-alpha0
-    #pip install drive-cli"""
-    run_commans(to_installs, timeout=60*10)
-
-#pip_install_thing()
-
-def upload_file_one_at_a_time(file_name, saved_name=None):
-    if not saved_name:
-        saved_name = file_name.split('/')[-1]
-    run_process_print("curl  --header \"File-Name:{1}\" --data-binary @{0} http://23.105.212.181:8001".format(file_name, saved_name))
-    #print("You need to goto VPS and change filename")
-
-def download_file_one_at_a_time(file_name, directory=".", overwrite=False):
-    if overwrite:
-        run_process_print("wget http://23.105.212.181:8000/{0} -O \"{1}/{0}\"".format(file_name, directory))
-    else:
-        run_process_print("[ -f {1}/{0} ] || wget http://23.105.212.181:8000/{0} -P {1}".format(file_name, directory))
-
-#upload_file_one_at_a_time("env_prepare.py")
-
-def setup_kaggle():
-    s = """pip install kaggle 
-    mkdir $HOME/.kaggle 
-    echo '{"username":"k1gaggle","key":"f51513f40920d492e9d81bc670b25fa9"}' > $HOME/.kaggle/kaggle.json
-    chmod 600 $HOME/.kaggle/kaggle.json
-    """
-    run_commans(s, timeout=60)
-
-def download_kaggle_data():
-    if not os.path.isfile('../input/jigsaw-unintended-bias-in-toxicity-classification/test.csv'):
-        s = """kaggle competitions download jigsaw-unintended-bias-in-toxicity-classification
-        unzip test.csv.zip
-        unzip train.csv.zip
-        """
-        run_commans(s, timeout=60)
-
-
-def setup_gdrive():
-    download_file_one_at_a_time("gdrive")
-    s = """chmod +x ./gdrive
-    mkdir $HOME/.gdrive 
-    chmod +x ./gdrive
-    """
-    run_commans(s)
-    #download_file_one_at_a_time("token_v2.json", "$HOME/.gdrive")
-    str= """{
-        "access_token": "ya29.GlsWB6DpEzK1qbegW-7FGy84GUtdR8O57aoq3i73DiFLlwpGxG1hZGwCVLiBIFNCDIw0zgQ6Fs4aBkf1YWbc30_yJMLCtv1E1b20nqMF2gRF3cJU_Ks-xnsaF5WV",
-        "token_type": "Bearer",
-        "refresh_token": "1/uxgj61NZOFM_LkIZd6QHpGX0Nj8bm9004DK68Ywu0pU",
-        "expiry": "2019-05-27T06:11:29.604819094-04:00"
-    }"""
-    with open("token_v2.json", 'wb') as f:
-            f.write(bytes(str, 'utf-8'))
-    run_process_print('mv token_v2.json $HOME/.gdrive') # last command cannot know $HOME easily, so python + shell
-
-def mount_gdrive():
-    from google.colab import drive
-    drive.mount('/content/gdrivedata')
-
-    run_process_print(f'touch {TFRECORD_FILDATA_FLAG}')
-
-
-#setup_gdrive()
-#upload_file_one_at_a_time("~/.kaggle/kaggle.json")
-#upload_file_one_at_a_time("env_prepare.py")
-
-#upload_file_one_at_a_time("/sync/AI/dog-breed/kaggle-dog-breed/src/solver/server.py")
-#download_file_one_at_a_time("kaggle.json")
-#download_file_one_at_a_time("server.py")
-
-def list_submisstion():
-    run_process_print("kaggle competitions submissions -c jigsaw-unintended-bias-in-toxicity-classification")
-
-
-def get_mem_hogs():
-    '''get memory usage by ipython objects
-
-    :return: sorted ipython objects (name, mem_usage) list
-    '''
-    import sys
-    # These are the usual ipython objects, including this one you are creating
-    ipython_vars = ['In', 'Out', 'exit', 'quit', 'get_ipython', 'ipython_vars']
-
-    # Get a sorted list of the objects and their sizes
-    return sorted([(x, sys.getsizeof(globals().get(x))) for x in dir() if not x.startswith('_') and x not in sys.modules and x not in ipython_vars], key=lambda x: x[1], reverse=True)
-
-def download_lstm_from_gdrive():
-    """
-    download from gdrive, files are in `lstm_data` folder
-    """
-    run_commans(
-        f"""
-        #./gdrive download 1V651fAb8_RxDF--VfHWlUQ8wTzULPPyu --path {GDRIVE_DOWNLOAD_DEST} # train
-        #./gdrive download 144glCjAb6rTJXNddslpc-mgQBCGGybTr --path {GDRIVE_DOWNLOAD_DEST} # test
-        #./gdrive download 1A3vj6mBUTGYnvd4HfDyI9hBT78IWyABf --path {GDRIVE_DOWNLOAD_DEST} # embedding
-        #./gdrive download 1d_2uUzStUhuzErWAcIIk2TuzA1bFyKN7 --path {GDRIVE_DOWNLOAD_DEST} # predicts (no res)
-        ./gdrive download 1H6ktwj59KtmiUbXZT4bwT7cIUL77MLsa --path {GDRIVE_DOWNLOAD_DEST} # model
-        #./gdrive download   # predicts result (for target)
-        #./gdrive download   # identity model
-        #mv lstm_data/* . 
-        touch """ + TFRECORD_FILDATA_FLAG
-        ,
-        timeout=60*10
-    )
-
-def up():
-    run_process_print('rm -rf __pycache__ /proc/driver/nvidia/identity-model/events*')
-    download_file_one_at_a_time("data_prepare.py", overwrite=True)
-    download_file_one_at_a_time("lstm.py", overwrite=True)
-    download_file_one_at_a_time("env_prepare.py", overwrite=True)
-
-def exit00():
-    import os
-    os._exit(00)  # will make ipykernel restart
-
-#setup_gdrive()
-
-#up()  # this is needed always
-
+# #!nvidia-smi
 # -
 
 
+# ## Utils functions
+
+# helpful functions, for debugging mainly
+
+
 # +
-#!./gdrive download 1BRjcc1TGwz1E2svr-4BJcKZDNtCdroex; mkdir models ; mv *pth models #!pip install torchsnooper
+import types
+def update_instance_function(func, instance, func_name_of_instance):
+    attr = instance.__setattr__(func_name_of_instance, types.MethodType(func, instance))
 # -
 
-# +
 
+# ## Seeding, data preparation
+
+
+# +
+# The images are actually quite big. We will resize to a much smaller size.
+
+bs = 64  # smaller batch size is better for training, but may take longer
+sz = 224  # transformed to this size
+# -
+# +
 # Making pretrained weights work without needing to find the default filename
 if not os.path.exists('/tmp/.cache/torch/checkpoints/'):
     os.makedirs('/tmp/.cache/torch/checkpoints/')
@@ -231,16 +104,15 @@ def seed_everything(seed):
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
 
-def pre_prepare_train_dev_data():
+
+def prepare_for_party():
     print('Make sure cudnn is enabled:', torch.backends.cudnn.enabled)
-    SEED = 999
-    seed_everything(SEED)
+    if not final_submission:
+        SEED = 999
+        seed_everything(SEED)
 
 
-def prepare_train_dev_data():
-    base_image_dir = os.path.join('..', 'input/aptos2019-blindness-detection/')
-    train_dir = os.path.join(base_image_dir, 'train_images/')
-    df = pd.read_csv(os.path.join(base_image_dir, 'train.csv'))
+def prepare_train_dev_data(df):
     df['path'] = df['id_code'].map(lambda x: os.path.join(train_dir, '{}.png'.format(x)))
     df = df.drop(columns=['id_code'])
     df = df.sample(frac=1).reset_index(drop=True)  # shuffle dataframe
@@ -285,8 +157,15 @@ def prepare_train_dev_data():
 
 
 # +
-pre_prepare_train_dev_data()
-df = prepare_train_dev_data()
+base_image_dir = os.path.join('..', 'input/aptos2019-blindness-detection/')
+train_dir = os.path.join(base_image_dir, 'train_images/')
+df = pd.read_csv(os.path.join(base_image_dir, 'train.csv'))
+if use_less_train_data:
+    df = df.sample(frac=0.1).copy()
+
+prepare_for_party()
+
+df = prepare_train_dev_data(df)
 
 # This is actually very small. The [previous competition](https://kaggle.com/c/diabetic-retinopathy-detection) had ~35k images, which supports the idea that pretraining on that dataset may be quite beneficial.
 
@@ -309,10 +188,6 @@ print(width, height)
 # +
 # plt.imshow(np.asarray(im))
 
-# The images are actually quite big. We will resize to a much smaller size.
-
-bs = 64  # smaller batch size is better for training, but may take longer
-sz = 224  # transformed to this size
 
 
 # called in this:
@@ -431,7 +306,9 @@ src.valid.y
 
 
 # +
-# data.show_batch(rows=3, figsize=(7,6))
+#data.show_batch(rows=3, figsize=(7,6))
+train_dev_ratio = len(data.dl(DatasetType.Train).x) / len(data.dl(DatasetType.Valid).x)
+assert 3.9 < train_dev_ratio < 4.1
 # -
 
 
@@ -439,10 +316,9 @@ src.valid.y
 
 # The Kaggle competition used the Cohen's quadratically weighted kappa so I have that here to compare. This is a better metric when dealing with imbalanced datasets like this one, and for measuring inter-rater agreement for categorical classification (the raters being the human-labeled dataset and the neural network predictions). Here is an implementation based on the scikit-learn's implementation, but converted to a pytorch tensor, as that is what fastai uses.
 
+# ### metric
 
 # +
-from sklearn.metrics import cohen_kappa_score
-
 def convert_to_normal_pred(pred):  # for batched data, still is the batch size, (64,7)
     thresh_for_PDR = 3.
 
@@ -487,50 +363,8 @@ def quadratic_kappa(y_hat, y):
 # -
 
 
-# +
-# **Training:**
-#
-# We use transfer learning, where we retrain the last layers of a pretrained neural network. I use the ResNet50 architecture trained on the ImageNet dataset, which has been commonly used for pre-training applications in computer vision. Fastai makes it quite simple to create a model and train:
-def create_DR_head(nf:int, nc:int, lin_ftrs:Optional[Collection[int]]=None, ps:Floats=0.5,
-                concat_pool:bool=True, bn_final:bool=False):
-    "Model head that takes `nf` features, runs through `lin_ftrs`, and about `nc` classes."
-    lin_ftrs = [nf, 512, nc] if lin_ftrs is None else [nf] + lin_ftrs + [nc]
-    ps = listify(ps)
-    if len(ps) == 1: ps = [ps[0]/2] * (len(lin_ftrs)-2) + ps
-    actns = [nn.ReLU(inplace=True)] * (len(lin_ftrs)-2) + [None]
-    pool = AdaptiveConcatPool2d() if concat_pool else nn.AdaptiveAvgPool2d(1)
-    layers = [pool, Flatten()]
-    for ni,no,p,actn in zip(lin_ftrs[:-1], lin_ftrs[1:], ps, actns):
-        layers += bn_drop_lin(ni, no, True, p, actn)
-    if bn_final: layers.append(nn.BatchNorm1d(lin_ftrs[-1], momentum=0.01))
-    return nn.Sequential(*layers)
+# ### loss
 
-def DR_learner(data: DataBunch, base_arch: Callable, cut: Union[int, Callable] = None, pretrained: bool = True,
-               lin_ftrs: Optional[Collection[int]] = None, ps: Floats = 0.5, custom_head: Optional[nn.Module] = None,
-               split_on: Optional[SplitFuncOrIdxList] = None, bn_final: bool = False, init=nn.init.kaiming_normal_,
-               concat_pool: bool = True, attention=False, **kwargs: Any) -> Learner:
-    "Build convnet style learner."
-    meta = cnn_config(base_arch)
-
-    "Create custom convnet architecture"
-    body = create_body(base_arch, pretrained, cut)
-    if custom_head is None:  # quadnet head
-        nf = num_features_model(nn.Sequential(*body.children())) * (2 if concat_pool else 1)
-        if attention:
-            pass
-        head = create_DR_head(nf, data.c+2, lin_ftrs, ps=ps, concat_pool=concat_pool, bn_final=bn_final)
-    else:
-        head = custom_head
-
-    model = nn.Sequential(body, head)
-
-    learn = Learner(data, model, **kwargs)
-    learn.split(split_on or meta['split'])
-    if pretrained: learn.freeze()
-    if init: apply_init(model[1], init)
-    return learn
-
-# -
 
 # +
 # modified based https://github.com/DingKe/pytorch_workplace/blob/master/focalloss/loss.py
@@ -637,7 +471,6 @@ class DR_FocalLoss(nn.Module):
         # for reg loss, we do class balance too
         reg_loss = self.reg_mag * F.smooth_l1_loss(reg_score_pred, target[:, -1], reduction='none')
 
-        set_trace()
         NPDR1_inds_subset = torch.nonzero(coarse_target[:, -1] == 1).squeeze(1)
         NPDR2_inds_subset = torch.nonzero(coarse_target[:, -1] == 2).squeeze(1)
         NPDR3_inds_subset = torch.nonzero(coarse_target[:, -1] == 3).squeeze(1)
@@ -692,7 +525,56 @@ class DR_FocalLoss(nn.Module):
         #return ret
         return loss
 # -
-    
+
+
+# ### learner (resnet 50)
+
+
+# +
+# **Training:**
+#
+# We use transfer learning, where we retrain the last layers of a pretrained neural network. I use the ResNet50 architecture trained on the ImageNet dataset, which has been commonly used for pre-training applications in computer vision. Fastai makes it quite simple to create a model and train:
+def create_DR_head(nf:int, nc:int, lin_ftrs:Optional[Collection[int]]=None, ps:Floats=0.5,
+                   concat_pool:bool=True, bn_final:bool=False):
+    "Model head that takes `nf` features, runs through `lin_ftrs`, and about `nc` classes."
+    lin_ftrs = [nf, 512, nc] if lin_ftrs is None else [nf] + lin_ftrs + [nc]
+    ps = listify(ps)
+    if len(ps) == 1: ps = [ps[0]/2] * (len(lin_ftrs)-2) + ps
+    actns = [nn.ReLU(inplace=True)] * (len(lin_ftrs)-2) + [None]
+    pool = AdaptiveConcatPool2d() if concat_pool else nn.AdaptiveAvgPool2d(1)
+    layers = [pool, Flatten()]
+    for ni,no,p,actn in zip(lin_ftrs[:-1], lin_ftrs[1:], ps, actns):
+        layers += bn_drop_lin(ni, no, True, p, actn)
+    if bn_final: layers.append(nn.BatchNorm1d(lin_ftrs[-1], momentum=0.01))
+    return nn.Sequential(*layers)
+
+def DR_learner(data: DataBunch, base_arch: Callable, cut: Union[int, Callable] = None, pretrained: bool = True,
+               lin_ftrs: Optional[Collection[int]] = None, ps: Floats = 0.5, custom_head: Optional[nn.Module] = None,
+               split_on: Optional[SplitFuncOrIdxList] = None, bn_final: bool = False, init=nn.init.kaiming_normal_,
+               concat_pool: bool = True, attention=False, **kwargs: Any) -> Learner:
+    "Build convnet style learner."
+    meta = cnn_config(base_arch)
+
+    "Create custom convnet architecture"
+    body = create_body(base_arch, pretrained, cut)
+    if custom_head is None:  # quadnet head
+        nf = num_features_model(nn.Sequential(*body.children())) * (2 if concat_pool else 1)
+        if attention:
+            pass
+        head = create_DR_head(nf, data.c+2, lin_ftrs, ps=ps, concat_pool=concat_pool, bn_final=bn_final)
+    else:
+        head = custom_head
+
+    model = nn.Sequential(body, head)
+
+    learn = Learner(data, model, **kwargs)
+    learn.split(split_on or meta['split'])
+    if pretrained: learn.freeze()
+    if init: apply_init(model[1], init)
+    return learn
+
+# -
+
 
 # +
 cls_cnt = df['diagnosis'].value_counts().sort_index().values
@@ -705,8 +587,12 @@ learn = DR_learner(data, vision.models.resnet50, cut=-1, loss_func=fl_normal, me
 
 # -
 
+
+# ### train
+
+
 # +
-def train_triangular_lr(learn, inner_step=0, cycle_cnt=None, max_lr=None, loss=None, lr=None):
+def train_triangular_lr(learn, inner_step=0, cycle_cnt=None, max_lr=None, loss=None):
     if inner_step == 0:
         if loss is not None:
             learn.loss_func = loss
@@ -715,6 +601,7 @@ def train_triangular_lr(learn, inner_step=0, cycle_cnt=None, max_lr=None, loss=N
         learn.recorder.plot(suggestion=True)
     elif inner_step == 1:
         assert max_lr is not None and cycle_cnt is not None
+        learn.freeze()
         learn.fit_one_cycle(cycle_cnt, max_lr=max_lr, wd=0.1)
         learn.recorder.plot_losses()
         learn.recorder.plot_metrics()
@@ -724,10 +611,11 @@ def train_triangular_lr(learn, inner_step=0, cycle_cnt=None, max_lr=None, loss=N
         learn.lr_find()
         learn.recorder.plot(suggestion=True)
     elif inner_step == 3:
-        assert max_lr is not None and lr is not None and cycle_cnt is not None
+        assert max_lr is not None and cycle_cnt is not None
         # Min numerical gradient: 1.91E-06
         #learn.fit_one_cycle(6, max_lr=slice(1e-6, 5e-6/5))
-        learn.fit_one_cycle(cycle_cnt, max_lr=slice(max_lr, lr/5))
+        learn.unfreeze()
+        learn.fit_one_cycle(cycle_cnt, max_lr=max_lr)
     
         learn.recorder.plot_losses()
         learn.recorder.plot_metrics()
@@ -755,45 +643,57 @@ cmdstr = 'sh ./log_tel.sh'
 
 # -
 # +
-train_triangular_lr(learn, inner_step=0)
+if submitting_to_LB:
+    train_triangular_lr(learn, inner_step=0)
 # -
 
 # +
 def get_max_lr(learn):
-    rec = learn.recorder
-    lrs = rec._split_list(rec.lrs, 10, 5)
-    losses = rec._split_list(rec.losses, 10, 5)
-    losses = [x.item() for x in losses]
-
     try:
+        rec = learn.recorder
+        lrs = rec._split_list(rec.lrs, 10, 5)
+        losses = rec._split_list(rec.losses, 10, 5)
+        losses = [x.item() for x in losses]
+
         mg = (np.gradient(np.array(losses))).argmin()
+        print(f"Min numerical gradient: {lrs[mg]:.2E}")
+        return lrs[mg]
     except:
         print("Failed to compute the gradients, there might not be enough points.")
         return None
 
-    print(f"Min numerical gradient: {lrs[mg]:.2E}")
-    return lrs[mg]
 # -
 
 # +
-max_lr_stage_1 = get_max_lr(learn)
-if max_lr_stage_1 is None:
-    max_lr_stage_1 = 3e-2
-max_lr_stage_1 = 1e-2
-train_triangular_lr(learn, inner_step=1, cycle_cnt=4, max_lr=max_lr_stage_1)  # choose 3.31E-02 as suggested
+stage_1_cycle = 4 if not use_less_train_data else 1
+
+max_lr_stage_1 = None
+if submitting_to_LB:
+    max_lr_stage_1 = get_max_lr(learn)
+
+if max_lr_stage_1 is None or max_lr_stage_1 < 5e-3:
+    max_lr_stage_1 = 1e-2
+train_triangular_lr(learn, inner_step=1, cycle_cnt=stage_1_cycle, max_lr=max_lr_stage_1)  # choose 3.31E-02 as suggested
 # -
 
 # + 
-train_triangular_lr(learn, inner_step=2)  # choose 3.31E-02 as suggested
+if submitting_to_LB:
+    train_triangular_lr(learn, inner_step=2)  # choose 3.31E-02 as suggested
 # -
 
 # + 
-max_lr_stage_2 = get_max_lr(learn)
+stage_2_cycle = 6 if not use_less_train_data else 1
+
+max_lr_stage_2 = None
+if submitting_to_LB:  # need to check, otherwise will use the one from stage_1 training....
+    max_lr_stage_2 = get_max_lr(learn)
+
 if max_lr_stage_2 is None or max_lr_stage_2 < 1e-6:
-    max_lr_stage_2 = 1e-6
+    max_lr_stage_2 = 1e-5
 last_layer_lr_scale_down = 10.
-last_layer_max_lr = max_lr_stage_1 / last_layer_lr_scale_down
-train_triangular_lr(learn, inner_step=4, cycle_cnt=6, max_lr=slice(max_lr_stage_2, last_layer_max_lr))
+
+last_layer_max_lr_stage_2 = max_lr_stage_1 / last_layer_lr_scale_down
+train_triangular_lr(learn, inner_step=3, cycle_cnt=stage_2_cycle, max_lr=slice(max_lr_stage_2, last_layer_max_lr_stage_2))
 # -
 
 # +
@@ -812,7 +712,6 @@ class DRClassificationInterpretation(ClassificationInterpretation):
         "Gets preds, y_true, losses to construct base class from a learner"
         preds_res = learn.get_preds(ds_type=ds_type, with_loss=True)
         return cls(learn, *preds_res, cls_converter=cls_converter)
-
 # -
 # +
 # Let's evaluate our model:
@@ -865,7 +764,7 @@ class OptimizedRounder(object):
             else:
                 X_p[i] = 4
 
-        ll = metrics.cohen_kappa_score(y, X_p, weights='quadratic')
+        ll = cohen_kappa_score(y, X_p, weights='quadratic')
         return -ll
 
     def fit(self, X, y):
@@ -897,9 +796,10 @@ class OptimizedRounder(object):
 # +
 valid_preds = (interp.preds, interp.y_true)
 optR = OptimizedRounder()
-optR.fit(valid_preds[0][:, -1], valid_preds[1])
+#optR.fit(valid_preds[0][:, -1], valid_preds[1]) #might overfit ...
 
-coefficients = optR.coefficients()
+#coefficients = optR.coefficients()
+coefficients = [0.5, 1.5, 2.5, 3.5]
 print(coefficients)
 # -
 
@@ -941,24 +841,29 @@ def _TTA(learn: Learner, beta: float = 0, ds_type: DatasetType = DatasetType.Val
 Learner.TTA = _TTA
 # -
 
+
+# ## predict submission.csv
+
+
 # +
-sample_df = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
-sample_df.head()
-learn.data.add_test(
-    ImageList.from_df(sample_df, '../input/aptos2019-blindness-detection', folder='test_images', suffix='.png'))
+if submitting_to_LB:
+    sample_df = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
+    sample_df.head()
+    learn.data.add_test(
+        ImageList.from_df(sample_df, '../input/aptos2019-blindness-detection', folder='test_images', suffix='.png'))
 
-preds, y = learn.TTA(ds_type=DatasetType.Test)
-test_predictions = optR.predict(preds[:, -1], coefficients)
+    preds, y = learn.TTA(ds_type=DatasetType.Test)
+    test_predictions = optR.predict(preds[:, -1], coefficients)
 
-sample_df.diagnosis = test_predictions.astype(int)
-sample_df.head()
+    sample_df.diagnosis = test_predictions.astype(int)
+    sample_df.head()
 
-sample_df.to_csv('submission.csv', index=False)
+    sample_df.to_csv('submission.csv', index=False)
 # -
 
 # +
 # use coefficients to predict
-interp.pred_class = torch.tensor(optR.predict(interp.preds[:,-1], coefficients).astype(np.int), dtype=torch.int)
+interp.pred_class = torch.tensor(optR.predict(interp.preds[:,-1], coefficients).astype(np.int), dtype=torch.int64)
 print(interp.confusion_matrix())
 print(cohen_kappa_score(interp.pred_class, interp.y_true, weights='quadratic'))
 # -

@@ -7,12 +7,16 @@
   "kernel_type": "notebook",
   "is_private": true,
   "enable_gpu": true,
-  "enable_internet": true,
-  "keywords": [],
-  "dataset_sources": [],
+  "enable_internet": false,
+  "keywords": [
+    "image processing"
+  ],
+  "dataset_sources": [
+    "pytorch/resnet50",
+    "tanlikesmath/diabetic-retinopathy-resized"
+  ],
   "kernel_sources": [],
   "competition_sources": [
-    "diabetic-retinopathy-detection",
     "aptos2019-blindness-detection"
   ]
 }

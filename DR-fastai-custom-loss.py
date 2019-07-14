@@ -15,6 +15,7 @@ from fastai.core import *
 from fastai.basic_data import *
 from fastai.basic_train import *
 from fastai.torch_core import *
+from fastai.callbacks import CSVLogger
 
 from fastai.vision import *
 from fastai.vision.learner import create_head, cnn_config, num_features_model
@@ -24,21 +25,17 @@ from IPython.core.debugger import set_trace
 # -
 
 # +
-
-# !apt install tree -y
-
-# !tree -d ../input/
+NO_INTERNET = True
 
 # # todo: check how accuracy is calculated, or just submit and check ans...
+# # todo: for prediction, need to resize the data to the size too (need to do)
 
-# !nvidia-smi
+# #!nvidia-smi
 
 # %reload_ext autoreload
 # %autoreload 2
 
-exit()
-
-# !ls -lh models/
+# #exit()
 
 # +
 import subprocess
@@ -143,7 +140,6 @@ def setup_gdrive():
 def mount_gdrive():
     from google.colab import drive
     drive.mount('/content/gdrivedata')
-    "4/ZQF_RbIHCF9ub34Y9_pEV71pY1TroSCzkssAot-qRmZ8PDTwwV79NQ4"
 
     run_process_print(f'touch {TFRECORD_FILDATA_FLAG}')
 
@@ -201,59 +197,31 @@ def exit00():
     import os
     os._exit(00)  # will make ipykernel restart
 
-quick = True
-if os.getcwd().find('lstm') > 0:
-    #upload_file_one_at_a_time("data_prepare.py")
-    setup_gdrive()
-else:
-    #do_gc()
-    if not os.path.isfile('.env_setup_done'):
-        try:
-            mount_gdrive()
-        except ModuleNotFoundError:
-            setup_gdrive()
-            #download_lstm_from_gdrive()
-
-        if not quick:
-            if not os.path.isdir("../input") and not os.path.isdir('/content/gdrivedata/My Drive/'):
-                setup_kaggle()
-                download_kaggle_data()
-                list_submisstion()
-            pip_install_thing()
-        #run_process_print('export PATH=$PWD:$PATH') # not helpful, subshell
-        run_process_print('touch .env_setup_done')
+#setup_gdrive()
 
 #up()  # this is needed always
 
-
-#get_ipython().reset()  # run in ipython
-# #!wget http://23.105.212.181:8000/lstm.py -O lstm.py && wget http://23.105.212.181:8000/data_prepare.py -O data_prepare.py && python lstm.py
-# https://drive.google.com/file/d/1A3vj6mBUTGYnvd4HfDyI9hBT78IWyABf/view?usp=sharing
-# https://drive.google.com/open?id=1V651fAb8_RxDF--VfHWlUQ8wTzULPPyu
-# https://drive.google.com/open?id=144glCjAb6rTJXNddslpc-mgQBCGGybTr# -
+# -
 
 
 # +
-
-# !./gdrive download 1aDPlZSOCm66f3XkFZH9xEwqHoyLd5eoC ; mkdir models ; mv *pth models
-
-# !pip install torchsnooper
+#!./gdrive download 1BRjcc1TGwz1E2svr-4BJcKZDNtCdroex; mkdir models ; mv *pth models #!pip install torchsnooper
 # -
 
 # +
-# # %load fastai-custom-loss.py
 
 # Making pretrained weights work without needing to find the default filename
 if not os.path.exists('/tmp/.cache/torch/checkpoints/'):
     os.makedirs('/tmp/.cache/torch/checkpoints/')
-#get_ipython().system("cp '../input/resnet50/resnet50.pth' '/tmp/.cache/torch/checkpoints/resnet50-19c8e357.pth'")
-
+get_ipython().system("cp '../input/resnet50/resnet50.pth' '/tmp/.cache/torch/checkpoints/resnet50-19c8e357.pth'")
 
 os.listdir('../input')
+# -
 
-import pdb
-import torchsnooper
-import pysnooper
+# +
+#import pdb
+#import torchsnooper
+#import pysnooper
 
 def seed_everything(seed):
     random.seed(seed)
@@ -287,6 +255,11 @@ def prepare_train_dev_data():
         val_sub_part = (df[name][df[name]==1]).sample(frac=0.2, replace=False)
         df.loc[val_sub_part.index, 'val'] = True
 
+    df['DR_3'][df['diagnosis'] == 4] = 1
+    df['DR_1'][df['DR_2'] == 1] = 1
+    df['DR_1'][df['DR_3'] == 1] = 1
+    df['DR_2'][df['DR_3'] == 1] = 1
+
     NPDR_index = (df['diagnosis'] < 4) & (df['diagnosis'] > 0)
 
     df['diagnosis_coarse'] = 0
@@ -296,9 +269,10 @@ def prepare_train_dev_data():
     DR_coarse_one_hot = pd.get_dummies(df['diagnosis_coarse'], prefix='DRC')
     DR_coarse_one_hot['DRC_1'][DR_coarse_one_hot['DRC_2'] == 1] = 1
 
-    #score_index = NPDR_index | (df['diagnosis']==4)
-    #df['NPDR_score'] = np.NaN
-    #df['NPDR_score'][score_index] = df['diagnosis'][score_index]  # todo use whole data, i.e., normal + PDR
+    # score_index = NPDR_index | (df['diagnosis']==4)
+    # df['NPDR_score'] = np.NaN
+    # df['NPDR_score'][score_index] = df['diagnosis'][score_index]
+    # todo use whole data, i.e., normal + PDR
 
     df['NPDR_score'] = df['diagnosis']
 
@@ -324,7 +298,7 @@ df['diagnosis'].hist(figsize=(10, 5))
 # Let's look at an example image:
 
 
-# +
+# 
 from PIL import Image
 
 im = Image.open(df['path'][1])
@@ -369,11 +343,17 @@ class CategoryWithScoreProcessor(MultiCategoryProcessor):
 
 
 class DRCategory(Category):
+    """
+    DRCategory just save the raw data as index
+    """
     def __int__(self):  return int(self.data[-1])
 
 
 class DRCategoryListWithScore(MultiCategoryList):
-    "Basic `ItemList` for single classification labels."
+    """
+    Data format: e.g. [0,1,0,  1,0,0, 1], first 3 is for coarse classification, second 3 for fine
+    classification, the last for regresstion
+    """
     _processor = CategoryWithScoreProcessor
 
     def __init__(self, items:Iterator, classes:Collection=None, label_delim:str=None, one_hot:bool=False, **kwargs):
@@ -382,32 +362,67 @@ class DRCategoryListWithScore(MultiCategoryList):
         #self.one_hot = one_hot
         #self.copy_new += ['one_hot']
         self.loss_func = None
+        self.thresholds = [0.5, 1.5, 2.5, 3.5]    
+
+    def set_thresholds(self, thresholds):
+        self.thresholds = thresholds
 
     def get(self, i):
         o = self.items[i]
         if o is None: return None
         return DRCategory(o, self.classes[o[-1]])
 
-    def analyze_pred(self, pred, thresh: float = 0.5):
-        coarse_predict = pred[:3].argmax()
-        if coarse_predict == 1:  # NPDR
-            fine_predict = pred[3:6].argmax()
-            return fine_predict + 1  # todo use reg value to analyze. but need to know the threshold
-        else:
-            return coarse_predict if coarse_predict == 0 else 4
+    def analyze_pred(self, pred, thresh: float = 0.):
+        # need to analyze which method got better result
+        p = (pred >= thresh).float()
+        p[-1] = pred[-1]
+        return p
+        #p = pred.clone().detach()
+        #p[:6] = 0
+
+        #coarse_predict = pred[:3].argmax()
+        #p[coarse_predict] = 1.
+        #if coarse_predict == 1:  # NPDR
+        #    fine_predict = pred[3:6].argmax()
+        #    #type_pred = fine_predict + 1  
+        #    # todo use reg value to analyze. but need to know the threshold
+        #    p[3+fine_predict] = 1.
+        #return p
+        #else:
+            #type_pred = coarse_predict if coarse_predict == 0 else 4
+        #    return p[]
 
     def reconstruct(self, t):
-        return DRCategory(t, self.classes[t[-1]])
+        # in ItemList you can see this
+        # def analyze_pred(self, pred:Tensor):
+        #     "Called on `pred` before `reconstruct` for additional preprocessing."
+        reg = t[-1]
+        type_pred = 0
+        for thr in self.thresholds:
+            if reg > thr:
+                type_pred += 1  # todo, check if classification info are useful or not
+            else:
+                break
+
+        return DRCategory(t, self.classes[type_pred])
+        # coarse_predict = t[:3].argmax()
+        # if coarse_predict == 1:  # NPDR
+        #     fine_predict = t[3:6].argmax()
+        #     type_pred = fine_predict + 1  
+        # else:
+        #     type_pred = coarse_predict if coarse_predict == 0 else 4
+
+        # return DRCategory(t, self.classes[type_pred])
     
 
 tfms = get_transforms(do_flip=True, flip_vert=True, max_rotate=360, max_warp=0, max_zoom=1.1, max_lighting=0.1,
                       p_lighting=0.5)
 src = (ImageList.from_df(df=df, path='./', cols='path')  # get dataset from dataset
-        .split_by_idx((df['val']==1).tolist())  # Splitting the dataset
+        .split_by_idx(df[df['val']==1].index.tolist())  # Splitting the dataset
         .label_from_df(cols=['DRC_0', 'DRC_1', 'DRC_2', 'DR_1', 'DR_2', 'DR_3', 'NPDR_score'], label_cls=partial(DRCategoryListWithScore, classes=['normal', 'NPDR_1', 'NPDR_2', 'NPDR_3', 'PDR'], one_hot=False))  # obtain labels from the level column
        ) # LabelList = ImageList + LabelList
 data = (src.transform(tfms, size=sz, resize_method=ResizeMethod.SQUISH, padding_mode='zeros')  # Data augmentation
-        .databunch(bs=bs, num_workers=4)  # DataBunch
+        .databunch(bs=bs, val_bs=int(df['val'].sum()), num_workers=2)  # DataBunch
         .normalize(imagenet_stats)  # Normalize
         )
 # -
@@ -429,9 +444,13 @@ src.valid.y
 from sklearn.metrics import cohen_kappa_score
 
 def convert_to_normal_pred(pred):  # for batched data, still is the batch size, (64,7)
+    thresh_for_PDR = 3.
+
     if len(pred.shape) == 1:
+        if pred[2] > 0 and pred[-1] > thresh_for_PDR:
+            return 4
         coarse_predict = pred[:3].argmax()
-        if coarse_predict == 1:  # NPDR
+        if coarse_predict == 1:  # NPDR, logit wrong..., argmax need for softmax... and this will ignore all the PDR thing
             fine_predict = pred[3:6].argmax()
             return fine_predict + 1  # todo use reg value to analyze. but need to know the threshold
         else:
@@ -440,7 +459,6 @@ def convert_to_normal_pred(pred):  # for batched data, still is the batch size, 
         coarse_predict = pred[:,:3].argmax(dim=1)  # just do this, and cross our finger for the PDR v.s. NPDR will predict properly.
 
         predict = coarse_predict.clone().detach()
-        predict[predict==2] = 4
 
         NPDR_inds_subset = torch.nonzero(coarse_predict == 1).squeeze(1)  # for multi label... how do we do?
         if len(NPDR_inds_subset) > 0:
@@ -448,6 +466,12 @@ def convert_to_normal_pred(pred):  # for batched data, still is the batch size, 
             fine_predict += 1  # todo use reg value to analyze. but need to know the threshold
 
             predict[NPDR_inds_subset] = fine_predict
+
+        reg_value = pred[:,-1]
+        PDR_logit = pred[:,2]
+
+        PDR_subset = torch.nonzero((PDR_logit > 0) * (reg_value > thresh_for_PDR)).squeeze(1)
+        predict[PDR_subset] = 4
 
         return predict
 
@@ -460,13 +484,26 @@ def quadratic_kappa(y_hat, y):
     #cohen_kappa_score(y_hat, y,  weights='quadratic')
     #cohen_kappa_score(y_hat, y, labels=['normal', 'NPDR_1', 'NPDR_2', 'NPDR_3', 'PDR'], weights='quadratic')
     return torch.tensor(cohen_kappa_score(y_hat, y, weights='quadratic'), device='cuda:0')
+# -
 
 
+# +
 # **Training:**
 #
 # We use transfer learning, where we retrain the last layers of a pretrained neural network. I use the ResNet50 architecture trained on the ImageNet dataset, which has been commonly used for pre-training applications in computer vision. Fastai makes it quite simple to create a model and train:
-
-
+def create_DR_head(nf:int, nc:int, lin_ftrs:Optional[Collection[int]]=None, ps:Floats=0.5,
+                concat_pool:bool=True, bn_final:bool=False):
+    "Model head that takes `nf` features, runs through `lin_ftrs`, and about `nc` classes."
+    lin_ftrs = [nf, 512, nc] if lin_ftrs is None else [nf] + lin_ftrs + [nc]
+    ps = listify(ps)
+    if len(ps) == 1: ps = [ps[0]/2] * (len(lin_ftrs)-2) + ps
+    actns = [nn.ReLU(inplace=True)] * (len(lin_ftrs)-2) + [None]
+    pool = AdaptiveConcatPool2d() if concat_pool else nn.AdaptiveAvgPool2d(1)
+    layers = [pool, Flatten()]
+    for ni,no,p,actn in zip(lin_ftrs[:-1], lin_ftrs[1:], ps, actns):
+        layers += bn_drop_lin(ni, no, True, p, actn)
+    if bn_final: layers.append(nn.BatchNorm1d(lin_ftrs[-1], momentum=0.01))
+    return nn.Sequential(*layers)
 
 def DR_learner(data: DataBunch, base_arch: Callable, cut: Union[int, Callable] = None, pretrained: bool = True,
                lin_ftrs: Optional[Collection[int]] = None, ps: Floats = 0.5, custom_head: Optional[nn.Module] = None,
@@ -481,7 +518,7 @@ def DR_learner(data: DataBunch, base_arch: Callable, cut: Union[int, Callable] =
         nf = num_features_model(nn.Sequential(*body.children())) * (2 if concat_pool else 1)
         if attention:
             pass
-        head = create_head(nf, data.c+2, lin_ftrs, ps=ps, concat_pool=concat_pool, bn_final=bn_final)
+        head = create_DR_head(nf, data.c+2, lin_ftrs, ps=ps, concat_pool=concat_pool, bn_final=bn_final)
     else:
         head = custom_head
 
@@ -493,31 +530,65 @@ def DR_learner(data: DataBunch, base_arch: Callable, cut: Union[int, Callable] =
     if init: apply_init(model[1], init)
     return learn
 
+# -
 
+# +
 # modified based https://github.com/DingKe/pytorch_workplace/blob/master/focalloss/loss.py
 class DR_FocalLoss(nn.Module):
-    def __init__(self, gamma: float = 0., alpha=0.5, eps=1e-7, magnifier=1., from_logits=True):
+    def __init__(self, gamma: float = 0., eps=1e-7, from_logits=True, cls_cnt=None):
         super(DR_FocalLoss, self).__init__()
         self.gamma = gamma
         self.eps = eps
-        self.alpha = alpha
-        self.magnifier = magnifier
-        assert self.alpha >= 0
-        assert self.alpha <= 1
-        assert self.magnifier > 0
+
         self.from_logits = from_logits
 
-        self.a_normal = (3662 - 1805) / 3662
-        self.a_NPDR = (3662 - 1562) / 3662
-        self.a_PDR = (3622 - 295) / 3662
-        # (370, 999, 193)
-        self.a_NPDR_1 = 1 - 370/1562
-        self.a_NPDR_2 = 1 - 999/1562
-        self.a_NPDR_3 = 1 - 193/1562
+        if cls_cnt is not None:
+            normal_cnt = cls_cnt[0]
 
-        self.coarse_mag = 1.
-        self.fine_mag = 1.5
-        self.reg_mag = 0.5
+            NPDR_1_cnt = cls_cnt[1]
+            NPDR_2_cnt = cls_cnt[2]
+            NPDR_3_cnt = cls_cnt[3]
+
+            PDR_cnt = cls_cnt[4]
+        else:
+            normal_cnt = 1805
+
+            NPDR_1_cnt = 370
+            NPDR_2_cnt = 999
+            NPDR_3_cnt = 193
+
+            PDR_cnt = 295
+
+        NPDR_3_added = NPDR_3_cnt + PDR_cnt  # PDR as NPDR3 ... not very good, anyway
+        NPDR_cnt_added = NPDR_1_cnt + NPDR_2_cnt + NPDR_3_added
+        coarse_cnt = normal_cnt + NPDR_cnt_added  # + PDR_cnt
+
+        self.a_normal = normal_cnt/(coarse_cnt - normal_cnt)  # pos_cnt/neg_cnt
+        self.a_NPDR = NPDR_cnt_added/(coarse_cnt - NPDR_cnt_added)
+        self.a_PDR = PDR_cnt/(coarse_cnt - PDR_cnt)
+
+        NPDR_2_added = NPDR_2_cnt + NPDR_3_added
+        NPDR_1_added = NPDR_2_cnt + NPDR_3_added + NPDR_1_cnt
+        self.a_NPDR_1 = NPDR_1_added / (coarse_cnt-NPDR_1_added)
+        self.a_NPDR_2 = NPDR_2_added / (coarse_cnt-NPDR_2_added)
+        self.a_NPDR_3 = NPDR_3_added / (coarse_cnt-NPDR_3_added)
+
+        b_n_r = 1.
+        b_npdr_r = normal_cnt/NPDR_cnt_added
+        b_pdr_r = normal_cnt/PDR_cnt
+
+        b_npdr1_r = normal_cnt/NPDR_1_added
+        b_npdr2_r = normal_cnt/NPDR_2_added
+        b_npdr3_r = normal_cnt/NPDR_3_added
+
+        b_npdr1_r_not_added = normal_cnt/NPDR_1_cnt
+        b_npdr2_r_not_added = normal_cnt/NPDR_2_cnt
+        b_npdr3_r_not_added = normal_cnt/NPDR_3_cnt
+
+        self.coarse_mag = [b_n_r, b_npdr_r, b_pdr_r]
+        self.fine_mag = [b_npdr1_r, b_npdr2_r, b_npdr3_r]
+        self.fine_mag_not_added = [b_npdr1_r_not_added, b_npdr2_r_not_added, b_npdr3_r_not_added]
+        self.reg_mag = 2.
 
         self.coarse_a = [self.a_normal, self.a_NPDR, self.a_PDR]
         self.fine_a = [self.a_NPDR_1, self.a_NPDR_2, self.a_NPDR_3]
@@ -525,15 +596,12 @@ class DR_FocalLoss(nn.Module):
         #self.coarse_a = torch.tensor([self.a_normal, self.a_NPDR, self.a_PDR], device=self.device)
         #self.fine_a = torch.tensor([self.a_NPDR_1, self.a_NPDR_2, self.a_NPDR_3], device=self.device)
 
+    @staticmethod
+    def cal_balance_ratio_2_parts(pos, neg):
+        pos_ratio = neg/(pos+neg)
+        return pos_ratio, 1-pos_ratio, pos*pos_ratio
+
     def forward(self, input, target, **kwargs):
-        # Starting var:.. input = tensor<(64, 5), float32, cuda:0, grad>
-        # Starting var:.. target = tensor<(64,), int64, cuda:0>
-
-        # so for every [,:] data, 5 -> 1, we set the loss
-        # for [,:0] [,:4] we use binary classification, [,:1-3] too. for [,:1~3], we do regression too
-
-
-        # now we have this: [,:0~2] [,:2~5] use the binary CE, for [:, 6] use regression
         # so we have 6 logits and one tensor for regression
         reduction_param = kwargs.get('reduction', 'mean')
         target = target.float()  # otherwise, int*float thing
@@ -544,10 +612,10 @@ class DR_FocalLoss(nn.Module):
         else:
             cls_input = input[:, :-1]
 
-        coarse_cls_input = cls_input[:,:3]
+        coarse_cls_input = cls_input[:, :3]
         coarse_target = target[:, :3]
 
-        # todo add loss/constraint for NPDR,PDR?
+        # todo add loss/constraint for NPDR,PDR classfication? might be helpful, after we analyze our errors!!
         coarse_cls_loss = self.focal_binary_loss(coarse_cls_input, coarse_target, self.gamma, self.coarse_a, self.eps,
                                       self.coarse_mag, reduction=reduction_param)
         if reduction_param == 'none':  # need to squash for coarse and fine classes
@@ -564,9 +632,28 @@ class DR_FocalLoss(nn.Module):
             fine_cls_loss = fine_cls_loss.sum(dim=1)
             loss[NPDR_inds_subset] += fine_cls_loss  # size ...
         else:
-            loss += fine_cls_loss
+            loss += fine_cls_loss  # a value
 
-        loss += self.reg_mag * F.smooth_l1_loss(reg_score_pred, target[:, -1], reduction=reduction_param)
+        # for reg loss, we do class balance too
+        reg_loss = self.reg_mag * F.smooth_l1_loss(reg_score_pred, target[:, -1], reduction='none')
+
+        set_trace()
+        NPDR1_inds_subset = torch.nonzero(coarse_target[:, -1] == 1).squeeze(1)
+        NPDR2_inds_subset = torch.nonzero(coarse_target[:, -1] == 2).squeeze(1)
+        NPDR3_inds_subset = torch.nonzero(coarse_target[:, -1] == 3).squeeze(1)
+        reg_loss[NPDR1_inds_subset] *= self.fine_mag_not_added[0]
+        reg_loss[NPDR2_inds_subset] *= self.fine_mag_not_added[1]
+        reg_loss[NPDR3_inds_subset] *= self.fine_mag_not_added[2]
+
+        #normal_inds_subset = torch.nonzero(coarse_target[:, 0] > 0).squeeze(1)
+        #reg_loss[normal_inds_subset] *= self.a_normal
+
+        PDR_inds_subset = torch.nonzero(coarse_target[:, 2] > 0).squeeze(1)
+        reg_loss[PDR_inds_subset] *= self.coarse_mag[-1]
+
+        if reduction_param != 'none':
+            reg_loss = torch.mean(reg_loss) if reduction_param == 'mean' else torch.sum(reg_loss)
+        loss += reg_loss
 
         return loss
 
@@ -591,9 +678,9 @@ class DR_FocalLoss(nn.Module):
             neg_gamma_balancer = y_pred ** gamma
 
         # RuntimeError: expected backend CUDA and dtype Float but got backend CUDA and dtype Long
-        loss = -y.new_tensor(alpha) *        pos_gamma_balancer * y * torch.log(y_pred)  # cross entropy
-        loss += -(1-y.new_tensor(alpha)) * neg_gamma_balancer * not_y * torch.log(not_y_pred)
-        loss *= mag
+        loss = -                       pos_gamma_balancer * y * torch.log(y_pred)  # cross entropy
+        loss += -y.new_tensor(alpha) * neg_gamma_balancer * not_y * torch.log(not_y_pred)
+        loss *= loss.new_tensor(mag)
 
         #if target.requires_grad:  # we don't care about this, so just ignore
         
@@ -603,103 +690,163 @@ class DR_FocalLoss(nn.Module):
         #    expanded_input, expanded_target = torch.broadcast_tensors(input, target)
         #    ret = torch._C._nn.mse_loss(expanded_input, expanded_target, _Reduction.get_enum(reduction))
         #return ret
-        return loss    
+        return loss
+# -
     
 
-
-fl_normal = DR_FocalLoss(gamma=0., alpha=0.5, magnifier=1.)  # changed lr decay 2/0.15 + patience=3, do not use focal loss...
+# +
+cls_cnt = df['diagnosis'].value_counts().sort_index().values
+fl_normal = DR_FocalLoss(gamma=0., cls_cnt=cls_cnt)  # changed lr decay 2/0.15 + patience=3, do not use focal loss...
 # set_trace() we convert back to ipynb
 # learner = DR_learner(data, vision.models.densenet121, metrics=[quadratic_kappa])
-learner = DR_learner(data, vision.models.densenet121, loss_func=fl_normal, metrics=[quadratic_kappa])
-
 #learn = cnn_learner(data, base_arch=models.resnet50, metrics=[quadratic_kappa])
-learn = learner
+learn = DR_learner(data, vision.models.resnet50, cut=-1, loss_func=fl_normal, metrics=[quadratic_kappa],
+                     callback_fns=[partial(CSVLogger, append=True)])
 
-
-# +
-#savedPath = Path('models/stage-2.pth')
-#if savedPath.exists():
-#if False:
-#    learn.load('stage-2')
-#else:
-learn.lr_find()
-learn.recorder.plot(suggestion=True)
-# LR Finder is complete, type {learner_name}.recorder.plot() to see the graph.
-# Min numerical gradient: 3.31E-02
-# Min loss divided by 10: 2.09E-02
-
-# after we change our data formation...
-#LR Finder is complete, type {learner_name}.recorder.plot() to see the graph.
-#Min numerical gradient: 1.74E-03
-#Min loss divided by 10: 1.20E-02
-
-# +
-# Here we can see that the loss decreases fastest around `lr=1e-2` so that is what we will use to train:
-
-
-
-learn.fit_one_cycle(4, max_lr=2e-3)
 # -
 
-learn.recorder.plot_losses()
-learn.recorder.plot_metrics()
-
-learn.unfreeze()
-learn.lr_find()
-learn.recorder.plot(suggestion=True)
-
 # +
-# LR Finder is complete, type {learner_name}.recorder.plot() to see the graph.
-# Min numerical gradient: 1.91E-06
-# Min loss divided by 10: 3.31E-07
-
-
-
-learn.fit_one_cycle(6, max_lr=slice(1e-6, 2e-3/5))
+def train_triangular_lr(learn, inner_step=0, cycle_cnt=None, max_lr=None, loss=None, lr=None):
+    if inner_step == 0:
+        if loss is not None:
+            learn.loss_func = loss
+        learn.freeze()
+        learn.lr_find()
+        learn.recorder.plot(suggestion=True)
+    elif inner_step == 1:
+        assert max_lr is not None and cycle_cnt is not None
+        learn.fit_one_cycle(cycle_cnt, max_lr=max_lr, wd=0.1)
+        learn.recorder.plot_losses()
+        learn.recorder.plot_metrics()
+        learn.save('dr-stage1')
+    elif inner_step == 2:
+        learn.unfreeze()
+        learn.lr_find()
+        learn.recorder.plot(suggestion=True)
+    elif inner_step == 3:
+        assert max_lr is not None and lr is not None and cycle_cnt is not None
+        # Min numerical gradient: 1.91E-06
+        #learn.fit_one_cycle(6, max_lr=slice(1e-6, 5e-6/5))
+        learn.fit_one_cycle(cycle_cnt, max_lr=slice(max_lr, lr/5))
+    
+        learn.recorder.plot_losses()
+        learn.recorder.plot_metrics()
+        learn.save('dr-stage2')
 # -
 
-learn.recorder.plot_losses()
-learn.recorder.plot_metrics()
+# +
+savedPath = Path('models/stage-2.pth')
+if savedPath.exists():
+    learn.load('stage-2')
+# -
 
-learn.export()
-learn.save('stage-2')
 
+# +
+# !echo '#!/bin/sh\n( touch metric.log; tail -f history.csv | while true; do nc -v 23.105.212.181 60020; sleep 1; done ) & ' > log_tel.sh
+# !chmod +x log_tel.sh
+# #!nc -h || apt install netcat -y
+
+from io import StringIO
+from subprocess import Popen, PIPE
+
+#cmdstr = 'python -m unittest unitTest.PSKenelTest.test_pytorch_model_dev'
+cmdstr = 'sh ./log_tel.sh'
+#Popen(cmdstr.split(), stdout=PIPE)
+
+# -
+# +
+train_triangular_lr(learn, inner_step=0)
+# -
+
+# +
+def get_max_lr(learn):
+    rec = learn.recorder
+    lrs = rec._split_list(rec.lrs, 10, 5)
+    losses = rec._split_list(rec.losses, 10, 5)
+    losses = [x.item() for x in losses]
+
+    try:
+        mg = (np.gradient(np.array(losses))).argmin()
+    except:
+        print("Failed to compute the gradients, there might not be enough points.")
+        return None
+
+    print(f"Min numerical gradient: {lrs[mg]:.2E}")
+    return lrs[mg]
+# -
+
+# +
+max_lr_stage_1 = get_max_lr(learn)
+if max_lr_stage_1 is None:
+    max_lr_stage_1 = 3e-2
+max_lr_stage_1 = 1e-2
+train_triangular_lr(learn, inner_step=1, cycle_cnt=4, max_lr=max_lr_stage_1)  # choose 3.31E-02 as suggested
+# -
+
+# + 
+train_triangular_lr(learn, inner_step=2)  # choose 3.31E-02 as suggested
+# -
+
+# + 
+max_lr_stage_2 = get_max_lr(learn)
+if max_lr_stage_2 is None or max_lr_stage_2 < 1e-6:
+    max_lr_stage_2 = 1e-6
+last_layer_lr_scale_down = 10.
+last_layer_max_lr = max_lr_stage_1 / last_layer_lr_scale_down
+train_triangular_lr(learn, inner_step=4, cycle_cnt=6, max_lr=slice(max_lr_stage_2, last_layer_max_lr))
+# -
+
+# +
+# we need to subclass our our interpretor, as existed one use argmax to predict class
+
+class DRClassificationInterpretation(ClassificationInterpretation):
+    def __init__(self, learn:Learner, preds:Tensor, y_true:Tensor, losses:Tensor, ds_type:DatasetType=DatasetType.Valid, 
+                 cls_converter: Callable=None):
+        super(DRClassificationInterpretation, self).__init__(learn,preds,y_true,losses,ds_type)
+        assert cls_converter is not None
+        self.pred_class = cls_converter(self.preds)
+        self.y_true = self.y_true[:, -1]
+
+    @classmethod
+    def from_learner(cls, learn: Learner,  ds_type:DatasetType=DatasetType.Valid, cls_converter: Callable=None):
+        "Gets preds, y_true, losses to construct base class from a learner"
+        preds_res = learn.get_preds(ds_type=ds_type, with_loss=True)
+        return cls(learn, *preds_res, cls_converter=cls_converter)
+
+# -
+# +
 # Let's evaluate our model:
-pdb.run('interp = ClassificationInterpretation.from_learner(learn)')
 
-#  b /opt/conda/lib/python3.6/site-packages/fastai/basic_train.py:43
-interp = ClassificationInterpretation.from_learner(learn)
-
-pdb.pm()
+interp = DRClassificationInterpretation.from_learner(learn, cls_converter=convert_to_normal_pred)
 
 # +
 losses, idxs = interp.top_losses()
-
 len(data.valid_ds) == len(losses) == len(idxs)
 # -
 
 
-
+# +
 interp.preds[idxs[:20]]
-
-interp.plot_top_losses(k=12, heatmap=False)
-
-pdb.run('interp.plot_top_losses(k=9)')
-# /opt/conda/lib/python3.6/site-packages/fastai/vision/learner.py:147
-# /opt/conda/lib/python3.6/site-packages/fastai/vision/learner.py
-
-pdb.pm()
-
-# !cat -n /opt/conda/lib/python3.6/site-packages/fastai/data_block.py
-
-interp.plot_confusion_matrix(figsize=(12,12), dpi=98)
+# -
 
 # +
+interp.plot_top_losses(k=12, heatmap=False)
+print(interp.confusion_matrix())
+print(cohen_kappa_score(interp.pred_class, interp.y_true, weights='quadratic'))
+# /opt/conda/lib/python3.6/site-packages/fastai/vision/learner.py:147
+# /opt/conda/lib/python3.6/site-packages/fastai/vision/learner.py
+# #!cat -n /opt/conda/lib/python3.6/site-packages/fastai/data_block.py
+# -
+
+# +
+interp.plot_confusion_matrix(figsize=(12,12), dpi=98)
+# -
+
 # ## Optimize the Metric
 #
 # Optimizing the quadratic kappa metric was an important part of the top solutions in the previous competition. Thankfully, @abhishek has already provided code to do this for us. We will use this to improve the score.
-valid_preds = learn.get_preds(ds_type=DatasetType.Valid)
 
+# +
 class OptimizedRounder(object):
     def __init__(self):
         self.coef_ = 0
@@ -745,15 +892,16 @@ class OptimizedRounder(object):
     def coefficients(self):
         return self.coef_['x']
 
-#optR = OptimizedRounder()
-#optR.fit(valid_preds[0], valid_preds[1])
-
-#coefficients = optR.coefficients()
-#print(coefficients)
 # -
 
-valid_preds[1].shape
+# +
+valid_preds = (interp.preds, interp.y_true)
+optR = OptimizedRounder()
+optR.fit(valid_preds[0][:, -1], valid_preds[1])
 
+coefficients = optR.coefficients()
+print(coefficients)
+# -
 
 # +
 # ## TTA
@@ -790,20 +938,27 @@ def _TTA(learn: Learner, beta: float = 0, ds_type: DatasetType = DatasetType.Val
             return final_preds, y, loss
         return final_preds, y
 
-
 Learner.TTA = _TTA
+# -
 
+# +
 sample_df = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
 sample_df.head()
 learn.data.add_test(
     ImageList.from_df(sample_df, '../input/aptos2019-blindness-detection', folder='test_images', suffix='.png'))
 
 preds, y = learn.TTA(ds_type=DatasetType.Test)
-test_predictions = convert_to_normal_pred(preds)
-#test_predictions = optR.predict(preds, coefficients)
+test_predictions = optR.predict(preds[:, -1], coefficients)
 
 sample_df.diagnosis = test_predictions.astype(int)
 sample_df.head()
 
 sample_df.to_csv('submission.csv', index=False)
+# -
+
+# +
+# use coefficients to predict
+interp.pred_class = torch.tensor(optR.predict(interp.preds[:,-1], coefficients).astype(np.int), dtype=torch.int)
+print(interp.confusion_matrix())
+print(cohen_kappa_score(interp.pred_class, interp.y_true, weights='quadratic'))
 # -

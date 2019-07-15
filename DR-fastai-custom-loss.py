@@ -32,7 +32,7 @@ from IPython.core.debugger import set_trace
 # but it is recommended to first set `fast_commit` to false first and the kernel will run with only partial data to
 # check if there is bug in the code.
 fast_commit = True
-fast_commit_with_commit_runing_less_data = True  # otherwise just exit
+fast_commit_with_commit_runing_less_data = False  # otherwise just exit
 
 final_submission = False  # for disable random seed setting. Also, we can use all training data (no validation) for
                           # final submission
@@ -42,13 +42,13 @@ try:
     sub = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
 except:
     sub = pd.read_csv('../input/sample_submission.csv')
-sub.to_csv('submission.csv', index=False)  # so we can always submit
 
 submitting_to_LB = False
 use_less_train_data = False
 
 if fast_commit:
-    if len(sub) < 2000:
+    if len(sub) < 2000:  # commit, not submit to leaderboard
+        sub.to_csv('submission.csv', index=False)  # so we can always submit
         if fast_commit_with_commit_runing_less_data:
             use_less_train_data = True
         else:
@@ -381,16 +381,6 @@ class OptimizedRounder(object):
 # -
 
 # +
-#optR = OptimizedRounder()
-#optR.fit(valid_preds[0][:, -1], valid_preds[1]) #might overfit ...
-#coefficients = optR.coefficients()
-coefficients = [0.5, 1.5, 2.5, 3.5]
-#test_predictions = optR.predict(preds[:, -1], coefficients)
-
-print(coefficients)
-# -
-
-# +
 def convert_to_normal_pred(pred, thresholds):  # for batched data, still is the batch size, (64,7)
     thresh_for_PDR = 3.
 
@@ -442,6 +432,8 @@ def convert_to_normal_pred(pred, thresholds):  # for batched data, still is the 
 
 def quadratic_kappa(y_hat, y):
     # need to convert our answer format
+
+    coefficients = [0.5, 1.5, 2.5, 3.5]
     y_hat = convert_to_normal_pred(y_hat, coefficients)
     target = y[:, -1].int()
 
@@ -749,7 +741,6 @@ def get_max_lr(learn):
     except:
         print("Failed to compute the gradients, there might not be enough points.")
         return None
-
 # -
 
 # +
@@ -804,6 +795,7 @@ class DRClassificationInterpretation(ClassificationInterpretation):
 # +
 # Let's evaluate our model:
 
+coefficients = [0.5, 1.5, 2.5, 3.5]
 interp = DRClassificationInterpretation.from_learner(learn, cls_converter=partial(convert_to_normal_pred, thresholds=coefficients))
 
 # +
@@ -875,9 +867,10 @@ Learner.TTA = _TTA
 valid_preds = (interp.preds, interp.y_true)
 
 optR = OptimizedRounder()
-cls_weight = cls_cnt[0]/cls_cnt
-cls_weight[2] *= 2
-cls_weight[3] *= 3  # overfit....
+#cls_weight = cls_cnt[0]/cls_cnt
+cls_weight = [1,1,1,1,1]
+#cls_weight[2] *= 2
+#cls_weight[3] *= 3  # overfit....
 optR.fit(valid_preds[0][:, -1], valid_preds[1], cls_weight=cls_weight)  #might overfit ...(but at V15 code, without it, performance is really bad)
 
 coefficients = optR.coefficients()
@@ -901,7 +894,8 @@ if submitting_to_LB:
 
 # +
 # use coefficients to predict
-interp.pred_class = torch.tensor(optR.predict(interp.preds[:,-1], coefficients).astype(np.int), dtype=torch.int64)
-print(interp.confusion_matrix())
-print(cohen_kappa_score(interp.pred_class, interp.y_true, weights='quadratic'))
+if not submitting_to_LB:
+    interp.pred_class = torch.tensor(optR.predict(interp.preds[:,-1], coefficients).astype(np.int), dtype=torch.int64)
+    print(interp.confusion_matrix())
+    print(cohen_kappa_score(interp.pred_class, interp.y_true, weights='quadratic'))
 # -

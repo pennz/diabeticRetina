@@ -16,3 +16,7 @@
 # 是否需要设计网络来更新分类权重？
 回归自身有个loss，分类有个loss，直接加起来？
 回归的话，是
+
+# todo
+1. more data training
+2. cv2 preprocessing

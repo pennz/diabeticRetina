@@ -1,7 +1,30 @@
 #!/usr/bin/env python
 # coding: utf-8
 # +
+import os
+import types
+import numpy as np
 import pandas as pd
+import scipy as sp
+from functools import partial
+from sklearn.metrics import cohen_kappa_score
+
+import torch
+from fastai import *
+from fastai.core import *
+from fastai.basic_data import *
+from fastai.basic_train import *
+from fastai.torch_core import *
+from fastai.callbacks import CSVLogger
+
+from fastai.vision import *
+from fastai.vision.learner import create_head, cnn_config, num_features_model
+
+from IPython.core.debugger import set_trace
+
+# -
+
+# +
 # this cell is for fast submitting, refer https://www.kaggle.com/c/instant-gratification/discussion/94379#latest-546086
 # if you are sure your code is right, keep `fast_commit` to True, so after running this cell, code commission can be
 # done and you can submit the kernel for LB quickly.
@@ -9,10 +32,11 @@ import pandas as pd
 # but it is recommended to first set `fast_commit` to false first and the kernel will run with only partial data to
 # check if there is bug in the code.
 fast_commit = True
-fast_commit_with_commit_runing_less_data = True
+fast_commit_with_commit_runing_less_data = True  # otherwise just exit
 
 final_submission = False  # for disable random seed setting. Also, we can use all training data (no validation) for
                           # final submission
+
 
 try:
     sub = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
@@ -34,29 +58,6 @@ if fast_commit:
 # -
 
 # +
-import numpy as np
-import pandas as pd
-import os
-import scipy as sp
-from functools import partial
-from sklearn.metrics import cohen_kappa_score
-
-import torch
-from fastai import *
-from fastai.core import *
-from fastai.basic_data import *
-from fastai.basic_train import *
-from fastai.torch_core import *
-from fastai.callbacks import CSVLogger
-
-from fastai.vision import *
-from fastai.vision.learner import create_head, cnn_config, num_features_model
-
-from IPython.core.debugger import set_trace
-
-# -
-
-# +
 # %reload_ext autoreload
 # %autoreload 2
 # #!nvidia-smi
@@ -69,7 +70,6 @@ from IPython.core.debugger import set_trace
 
 
 # +
-import types
 def update_instance_function(func, instance, func_name_of_instance):
     attr = instance.__setattr__(func_name_of_instance, types.MethodType(func, instance))
 # -
@@ -298,8 +298,10 @@ src = (ImageList.from_df(df=df, path='./', cols='path')  # get dataset from data
         .split_by_idx(df[df['val']==1].index.tolist())  # Splitting the dataset
         .label_from_df(cols=['DRC_0', 'DRC_1', 'DRC_2', 'DR_1', 'DR_2', 'DR_3', 'NPDR_score'], label_cls=partial(DRCategoryListWithScore, classes=['normal', 'NPDR_1', 'NPDR_2', 'NPDR_3', 'PDR'], one_hot=False))  # obtain labels from the level column
        ) # LabelList = ImageList + LabelList
+twenty_per_size = int(df['val'].sum())
+val_bs = twenty_per_size if twenty_per_size < 800 else 512
 data = (src.transform(tfms, size=sz, resize_method=ResizeMethod.SQUISH, padding_mode='zeros')  # Data augmentation
-        .databunch(bs=bs, val_bs=int(df['val'].sum()), num_workers=2)  # DataBunch
+        .databunch(bs=bs, val_bs=val_bs, num_workers=2)  # DataBunch
         .normalize(imagenet_stats)  # Normalize
         )
 # -
@@ -320,48 +322,132 @@ assert 3.9 < train_dev_ratio < 4.1
 
 # ### metric
 
+# #### Optimize the Metric
+
+# Optimizing the quadratic kappa metric was an important part of the top solutions in the previous competition. Thankfully, @abhishek has already provided code to do this for us. We will use this to improve the score.
+
+
 # +
-def convert_to_normal_pred(pred):  # for batched data, still is the batch size, (64,7)
+class OptimizedRounder(object):
+    def __init__(self):
+        self.coef_ = 0
+
+    def _kappa_loss(self, coef, X, y, cls_weight):
+        X_p = np.copy(X)
+        for i, pred in enumerate(X_p):
+            if pred < coef[0]:
+                X_p[i] = 0
+            elif pred >= coef[0] and pred < coef[1]:
+                X_p[i] = 1
+            elif pred >= coef[1] and pred < coef[2]:
+                X_p[i] = 2
+            elif pred >= coef[2] and pred < coef[3]:
+                X_p[i] = 3
+            else:
+                X_p[i] = 4
+        sample_weight = y.new_zeros(y.size(), dtype=torch.float)
+        reg_predict = y.clone().detach()
+        inds = [torch.nonzero(reg_predict == type_id).squeeze(1) for type_id in range(5)]
+        for type_id, ind in enumerate(inds):
+            sample_weight[ind] = cls_weight[type_id]
+
+        ll = cohen_kappa_score(y, X_p, weights='quadratic', sample_weight=sample_weight)
+        return -ll
+
+    def fit(self, X, y, cls_weight):
+        loss_partial = partial(self._kappa_loss, X=X, y=y, cls_weight=cls_weight)
+        initial_coef = [0.5, 1.5, 2.5, 3.5]
+        self.coef_ = sp.optimize.minimize(loss_partial, initial_coef, method='nelder-mead')
+        print(-loss_partial(self.coef_['x']))
+
+    def predict(self, X, coef):
+        X_p = np.copy(X)
+        for i, pred in enumerate(X_p):
+            if pred < coef[0]:
+                X_p[i] = 0
+            elif coef[0] <= pred < coef[1]:
+                X_p[i] = 1
+            elif coef[1] <= pred < coef[2]:
+                X_p[i] = 2
+            elif coef[2] <= pred < coef[3]:
+                X_p[i] = 3
+            else:
+                X_p[i] = 4
+        return X_p
+
+    def coefficients(self):
+        return self.coef_['x']
+
+# -
+
+# +
+#optR = OptimizedRounder()
+#optR.fit(valid_preds[0][:, -1], valid_preds[1]) #might overfit ...
+#coefficients = optR.coefficients()
+coefficients = [0.5, 1.5, 2.5, 3.5]
+#test_predictions = optR.predict(preds[:, -1], coefficients)
+
+print(coefficients)
+# -
+
+# +
+def convert_to_normal_pred(pred, thresholds):  # for batched data, still is the batch size, (64,7)
     thresh_for_PDR = 3.
 
     if len(pred.shape) == 1:
-        if pred[2] > 0 and pred[-1] > thresh_for_PDR:
-            return 4
-        coarse_predict = pred[:3].argmax()
-        if coarse_predict == 1:  # NPDR, logit wrong..., argmax need for softmax... and this will ignore all the PDR thing
-            fine_predict = pred[3:6].argmax()
-            return fine_predict + 1  # todo use reg value to analyze. but need to know the threshold
-        else:
-            return coarse_predict if coarse_predict == 0 else 4
+        #if pred[2] > 0 and pred[-1] > thresh_for_PDR:
+        #    return 4
+        #coarse_predict = pred[:3].argmax()
+        #if coarse_predict == 1:  # NPDR, logit wrong..., argmax need for softmax... and this will ignore all the PDR thing
+        #    fine_predict = pred[3:6].argmax()
+        #    return fine_predict + 1  # todo use reg value to analyze. but need to know the threshold
+        #else:
+        #    return coarse_predict if coarse_predict == 0 else 4
+
+        reg = pred[-1]
+        type_pred = 0
+        for thr in thresholds:
+            if reg > thr:
+                type_pred += 1  # todo, check if classification info are useful or not
+            else:
+                break
+        return type_pred
     else:
-        coarse_predict = pred[:,:3].argmax(dim=1)  # just do this, and cross our finger for the PDR v.s. NPDR will predict properly.
+        #coarse_predict = pred[:,:3].argmax(dim=1)  # just do this, and cross our finger for the PDR v.s. NPDR will predict properly.
 
-        predict = coarse_predict.clone().detach()
+        #predict = coarse_predict.clone().detach()
 
-        NPDR_inds_subset = torch.nonzero(coarse_predict == 1).squeeze(1)  # for multi label... how do we do?
-        if len(NPDR_inds_subset) > 0:
-            fine_predict = pred[NPDR_inds_subset,3:6].argmax(dim=1)
-            fine_predict += 1  # todo use reg value to analyze. but need to know the threshold
+        #NPDR_inds_subset = torch.nonzero(coarse_predict == 1).squeeze(1)  # for multi label... how do we do?
+        #if len(NPDR_inds_subset) > 0:
+        #    fine_predict = pred[NPDR_inds_subset,3:6].argmax(dim=1)
+        #    fine_predict += 1  # todo use reg value to analyze. but need to know the threshold
 
-            predict[NPDR_inds_subset] = fine_predict
+        #    predict[NPDR_inds_subset] = fine_predict
 
-        reg_value = pred[:,-1]
-        PDR_logit = pred[:,2]
+        #reg_value = pred[:,-1]
+        #PDR_logit = pred[:,2]
 
-        PDR_subset = torch.nonzero((PDR_logit > 0) * (reg_value > thresh_for_PDR)).squeeze(1)
-        predict[PDR_subset] = 4
+        #PDR_subset = torch.nonzero((PDR_logit > 0) * (reg_value > thresh_for_PDR)).squeeze(1)
+        #predict[PDR_subset] = 4
+        reg_predict = pred[:, -1].clone().detach()
+        inds = [torch.nonzero(reg_predict > thr).squeeze(1) for thr in thresholds]
+        predict = reg_predict.new_zeros(reg_predict.size(), dtype=torch.int64)
+        for type, ind in enumerate(inds):
+            predict[ind] = type+1
+
+        del reg_predict
 
         return predict
 
 
 def quadratic_kappa(y_hat, y):
     # need to convert our answer format
-    y_hat = convert_to_normal_pred(y_hat)
-    y = y[:,-1].int()
+    y_hat = convert_to_normal_pred(y_hat, coefficients)
+    target = y[:, -1].int()
 
     #cohen_kappa_score(y_hat, y,  weights='quadratic')
     #cohen_kappa_score(y_hat, y, labels=['normal', 'NPDR_1', 'NPDR_2', 'NPDR_3', 'PDR'], weights='quadratic')
-    return torch.tensor(cohen_kappa_score(y_hat, y, weights='quadratic'), device='cuda:0')
+    return torch.tensor(cohen_kappa_score(y_hat, target, weights='quadratic'), device='cuda:0')
 # -
 
 
@@ -617,7 +703,7 @@ def train_triangular_lr(learn, inner_step=0, cycle_cnt=None, max_lr=None, loss=N
         # Min numerical gradient: 1.91E-06
         #learn.fit_one_cycle(6, max_lr=slice(1e-6, 5e-6/5))
         learn.unfreeze()
-        learn.fit_one_cycle(cycle_cnt, max_lr=max_lr)
+        learn.fit_one_cycle(cycle_cnt, max_lr=max_lr, wd=0.1)
     
         learn.recorder.plot_losses()
         learn.recorder.plot_metrics()
@@ -667,14 +753,14 @@ def get_max_lr(learn):
 # -
 
 # +
-stage_1_cycle = 4 if not use_less_train_data else 1
+stage_1_cycle = 2 if not use_less_train_data else 1
 
 max_lr_stage_1 = None
 if submitting_to_LB:
     max_lr_stage_1 = get_max_lr(learn)
 
-if max_lr_stage_1 is None or max_lr_stage_1 < 5e-3:
-    max_lr_stage_1 = 1e-2
+if max_lr_stage_1 is None or max_lr_stage_1 < 5e-4:
+    max_lr_stage_1 = 5e-3
 train_triangular_lr(learn, inner_step=1, cycle_cnt=stage_1_cycle, max_lr=max_lr_stage_1)  # choose 3.31E-02 as suggested
 # -
 
@@ -684,14 +770,14 @@ if submitting_to_LB:
 # -
 
 # + 
-stage_2_cycle = 6 if not use_less_train_data else 1
+stage_2_cycle = 3 if not use_less_train_data else 1
 
 max_lr_stage_2 = None
 if submitting_to_LB:  # need to check, otherwise will use the one from stage_1 training....
     max_lr_stage_2 = get_max_lr(learn)
 
 if max_lr_stage_2 is None or max_lr_stage_2 < 1e-6:
-    max_lr_stage_2 = 1e-5
+    max_lr_stage_2 = 1e-6
 last_layer_lr_scale_down = 10.
 
 last_layer_max_lr_stage_2 = max_lr_stage_1 / last_layer_lr_scale_down
@@ -718,7 +804,7 @@ class DRClassificationInterpretation(ClassificationInterpretation):
 # +
 # Let's evaluate our model:
 
-interp = DRClassificationInterpretation.from_learner(learn, cls_converter=convert_to_normal_pred)
+interp = DRClassificationInterpretation.from_learner(learn, cls_converter=partial(convert_to_normal_pred, thresholds=coefficients))
 
 # +
 losses, idxs = interp.top_losses()
@@ -740,69 +826,7 @@ print(cohen_kappa_score(interp.pred_class, interp.y_true, weights='quadratic'))
 # -
 
 # +
-interp.plot_confusion_matrix(figsize=(12,12), dpi=98)
-# -
-
-# ## Optimize the Metric
-#
-# Optimizing the quadratic kappa metric was an important part of the top solutions in the previous competition. Thankfully, @abhishek has already provided code to do this for us. We will use this to improve the score.
-
-# +
-class OptimizedRounder(object):
-    def __init__(self):
-        self.coef_ = 0
-
-    def _kappa_loss(self, coef, X, y):
-        X_p = np.copy(X)
-        for i, pred in enumerate(X_p):
-            if pred < coef[0]:
-                X_p[i] = 0
-            elif pred >= coef[0] and pred < coef[1]:
-                X_p[i] = 1
-            elif pred >= coef[1] and pred < coef[2]:
-                X_p[i] = 2
-            elif pred >= coef[2] and pred < coef[3]:
-                X_p[i] = 3
-            else:
-                X_p[i] = 4
-
-        ll = cohen_kappa_score(y, X_p, weights='quadratic')
-        return -ll
-
-    def fit(self, X, y):
-        loss_partial = partial(self._kappa_loss, X=X, y=y)
-        initial_coef = [0.5, 1.5, 2.5, 3.5]
-        self.coef_ = sp.optimize.minimize(loss_partial, initial_coef, method='nelder-mead')
-        print(-loss_partial(self.coef_['x']))
-
-    def predict(self, X, coef):
-        X_p = np.copy(X)
-        for i, pred in enumerate(X_p):
-            if pred < coef[0]:
-                X_p[i] = 0
-            elif pred >= coef[0] and pred < coef[1]:
-                X_p[i] = 1
-            elif pred >= coef[1] and pred < coef[2]:
-                X_p[i] = 2
-            elif pred >= coef[2] and pred < coef[3]:
-                X_p[i] = 3
-            else:
-                X_p[i] = 4
-        return X_p
-
-    def coefficients(self):
-        return self.coef_['x']
-
-# -
-
-# +
-valid_preds = (interp.preds, interp.y_true)
-optR = OptimizedRounder()
-#optR.fit(valid_preds[0][:, -1], valid_preds[1]) #might overfit ...
-
-#coefficients = optR.coefficients()
-coefficients = [0.5, 1.5, 2.5, 3.5]
-print(coefficients)
+interp.plot_confusion_matrix(figsize=(12, 12), dpi=98)
 # -
 
 # +
@@ -846,6 +870,18 @@ Learner.TTA = _TTA
 
 # ## predict submission.csv
 
+
+# +
+valid_preds = (interp.preds, interp.y_true)
+
+optR = OptimizedRounder()
+cls_weight = cls_cnt[0]/cls_cnt
+cls_weight[2] *= 2
+cls_weight[3] *= 3  # overfit....
+optR.fit(valid_preds[0][:, -1], valid_preds[1], cls_weight=cls_weight)  #might overfit ...(but at V15 code, without it, performance is really bad)
+
+coefficients = optR.coefficients()
+# -
 
 # +
 if submitting_to_LB:

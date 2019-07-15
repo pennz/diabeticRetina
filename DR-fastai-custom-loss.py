@@ -849,7 +849,7 @@ def _tta_only(learn: Learner, ds_type: DatasetType = DatasetType.Valid, num_pred
 
 Learner.tta_only = _tta_only
 
-def _TTA(learn: Learner, beta: float = 0, ds_type: DatasetType = DatasetType.Valid, num_pred: int = 10,
+def _TTA(learn: Learner, beta: float = 0, ds_type: DatasetType = DatasetType.Valid, num_pred: int = 1,
          with_loss: bool = False) -> Tensors:
     "Applies TTA to predict on `ds_type` dataset."
     preds, y = learn.get_preds(ds_type)

@@ -55,6 +55,8 @@ if fast_commit:
             exit()
     else:  # this is real submit for leader board
         submitting_to_LB = True
+else:  # pretending/testing for submitting to LB
+    submitting_to_LB = True
 # -
 
 # +
@@ -506,6 +508,10 @@ class DR_FocalLoss(nn.Module):
 
         self.coarse_a = [self.a_normal, self.a_NPDR, self.a_PDR]
         self.fine_a = [self.a_NPDR_1, self.a_NPDR_2, self.a_NPDR_3]
+
+        print(self.coarse_mag, self.fine_mag, self.fine_mag_not_added,
+              "alpha balancer here will be multiplied by negtive loss part",
+              self.coarse_a, self.fine_a)
         #self.device = torch.device('cuda:0')
         #self.coarse_a = torch.tensor([self.a_normal, self.a_NPDR, self.a_PDR], device=self.device)
         #self.fine_a = torch.tensor([self.a_NPDR_1, self.a_NPDR_2, self.a_NPDR_3], device=self.device)
@@ -551,9 +557,9 @@ class DR_FocalLoss(nn.Module):
         # for reg loss, we do class balance too
         reg_loss = self.reg_mag * F.smooth_l1_loss(reg_score_pred, target[:, -1], reduction='none')
 
-        NPDR1_inds_subset = torch.nonzero(coarse_target[:, -1] == 1).squeeze(1)
-        NPDR2_inds_subset = torch.nonzero(coarse_target[:, -1] == 2).squeeze(1)
-        NPDR3_inds_subset = torch.nonzero(coarse_target[:, -1] == 3).squeeze(1)
+        NPDR1_inds_subset = torch.nonzero(target[:, -1] == 1).squeeze(1)
+        NPDR2_inds_subset = torch.nonzero(target[:, -1] == 2).squeeze(1)
+        NPDR3_inds_subset = torch.nonzero(target[:, -1] == 3).squeeze(1)
         reg_loss[NPDR1_inds_subset] *= self.fine_mag_not_added[0]
         reg_loss[NPDR2_inds_subset] *= self.fine_mag_not_added[1]
         reg_loss[NPDR3_inds_subset] *= self.fine_mag_not_added[2]
@@ -744,7 +750,7 @@ def get_max_lr(learn):
 # -
 
 # +
-stage_1_cycle = 2 if not use_less_train_data else 1
+stage_1_cycle = 4 if not use_less_train_data else 1
 
 max_lr_stage_1 = None
 if submitting_to_LB:
@@ -761,7 +767,7 @@ if submitting_to_LB:
 # -
 
 # + 
-stage_2_cycle = 3 if not use_less_train_data else 1
+stage_2_cycle = 6 if not use_less_train_data else 1
 
 max_lr_stage_2 = None
 if submitting_to_LB:  # need to check, otherwise will use the one from stage_1 training....
@@ -867,10 +873,13 @@ Learner.TTA = _TTA
 valid_preds = (interp.preds, interp.y_true)
 
 optR = OptimizedRounder()
-#cls_weight = cls_cnt[0]/cls_cnt
-cls_weight = [1,1,1,1,1]
-#cls_weight[2] *= 2
-#cls_weight[3] *= 3  # overfit....
+cls_weight = cls_cnt[0]/cls_cnt
+#cls_weight = [1,1,1,1,1]
+cls_weight[0] *= 0.5
+cls_weight[1] *= 1.5
+cls_weight[2] *= 3
+cls_weight[3] *= 1  # overfit....
+cls_weight[4] *= 0.5  # overfit....
 optR.fit(valid_preds[0][:, -1], valid_preds[1], cls_weight=cls_weight)  #might overfit ...(but at V15 code, without it, performance is really bad)
 
 coefficients = optR.coefficients()
@@ -894,8 +903,7 @@ if submitting_to_LB:
 
 # +
 # use coefficients to predict
-if not submitting_to_LB:
-    interp.pred_class = torch.tensor(optR.predict(interp.preds[:,-1], coefficients).astype(np.int), dtype=torch.int64)
-    print(interp.confusion_matrix())
-    print(cohen_kappa_score(interp.pred_class, interp.y_true, weights='quadratic'))
+interp.pred_class = torch.tensor(optR.predict(interp.preds[:,-1], coefficients).astype(np.int), dtype=torch.int64)
+print(interp.confusion_matrix())
+print(cohen_kappa_score(interp.pred_class, interp.y_true, weights='quadratic'))
 # -

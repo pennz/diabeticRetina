@@ -2,7 +2,6 @@
 # coding: utf-8
 # +
 import os
-import types
 import numpy as np
 import pandas as pd
 import scipy as sp
@@ -21,7 +20,6 @@ from fastai.vision import *
 from fastai.vision.learner import create_head, cnn_config, num_features_model
 
 from IPython.core.debugger import set_trace
-
 # -
 
 # +
@@ -31,12 +29,12 @@ from IPython.core.debugger import set_trace
 
 # but it is recommended to first set `fast_commit` to false first and the kernel will run with only partial data to
 # check if there is bug in the code.
-fast_commit = True
-fast_commit_with_commit_runing_less_data = False  # otherwise just exit
+fast_commit = True  # commit just to check run OK, we can use this for debugging. Write unittest suit in this jupyter notebook
+fast_commit_with_commit_runing_less_data = True  # otherwise just exit
 
+random_world = True
 final_submission = False  # for disable random seed setting. Also, we can use all training data (no validation) for
                           # final submission
-
 
 try:
     sub = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
@@ -67,16 +65,7 @@ else:  # pretending/testing for submitting to LB
 
 
 # ## Utils functions
-
 # helpful functions, for debugging mainly
-
-
-# +
-def update_instance_function(func, instance, func_name_of_instance):
-    attr = instance.__setattr__(func_name_of_instance, types.MethodType(func, instance))
-# -
-
-
 # ## Seeding, data preparation
 
 
@@ -100,6 +89,7 @@ os.listdir('../input')
 #import torchsnooper
 #import pysnooper
 
+
 def seed_everything(seed):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -111,12 +101,14 @@ def seed_everything(seed):
 
 def prepare_for_party():
     print('Make sure cudnn is enabled:', torch.backends.cudnn.enabled)
-    if not final_submission:
+    if not random_world:
         SEED = 999
         seed_everything(SEED)
 
+prepare_for_party()
 
-def prepare_train_dev_data(df):
+
+def prepare_train_dev_df(df):
     df['path'] = df['id_code'].map(lambda x: os.path.join(train_dir, '{}.png'.format(x)))
     df = df.drop(columns=['id_code'])
     df = df.sample(frac=1).reset_index(drop=True)  # shuffle dataframe
@@ -167,46 +159,24 @@ df = pd.read_csv(os.path.join(base_image_dir, 'train.csv'))
 if use_less_train_data:
     df = df.sample(frac=0.1).copy()
 
-prepare_for_party()
-
-df = prepare_train_dev_data(df)
+df = prepare_train_dev_df(df)
 
 # This is actually very small. The [previous competition](https://kaggle.com/c/diabetic-retinopathy-detection) had ~35k images, which supports the idea that pretraining on that dataset may be quite beneficial.
 
 # The dataset is highly imbalanced, with many samples for level 0, and very little for the rest of the levels.
 
-
-df['diagnosis'].hist(figsize=(10, 5))
+df['diagnosis'].hist(figsize=(10, 5))  # so might be overfitting!!!
 
 # Let's look at an example image:
-
-
-# 
 from PIL import Image
 
-im = Image.open(df['path'][1])
+im = Image.open(df['path'][0])
 width, height = im.size
-print(width, height)
+print("1st image size: ", width, height)
 #im
+# -
 
 # +
-# plt.imshow(np.asarray(im))
-
-
-
-# called in this:
-# /opt/conda/lib/python3.6/site-packages/fastai/data_block.py(477)_inner()
-#     475             self.valid = fv(*args, from_item_lists=True, **kwargs)
-#     476             self.__class__ = LabelLists
-# --> 477             self.process()
-#     478             return self
-#     479         return _inner
-
-# /opt/conda/lib/python3.6/site-packages/fastai/data_block.py(530)process()
-#     528     def process(self):
-#     529         "Process the inner datasets."
-# --> 530         xp,yp = self.get_processors()  # here the processor is of type fastai.data_block.MultiCategoryProcessor
-#     531         for ds,n in zip(self.lists, ['train','valid','test']): ds.process(xp, yp, name=n)
 class CategoryWithScoreProcessor(MultiCategoryProcessor):
     "`PreProcessor` that create `classes` from `ds.items` and handle the mapping."
     def __init__(self, ds: ItemList, one_hot: bool=False):
@@ -292,29 +262,62 @@ class DRCategoryListWithScore(MultiCategoryList):
         #     type_pred = coarse_predict if coarse_predict == 0 else 4
 
         # return DRCategory(t, self.classes[type_pred])
-    
+# -
+# +
 
-tfms = get_transforms(do_flip=True, flip_vert=True, max_rotate=360, max_warp=0, max_zoom=1.1, max_lighting=0.1,
-                      p_lighting=0.5)
 src = (ImageList.from_df(df=df, path='./', cols='path')  # get dataset from dataset
         .split_by_idx(df[df['val']==1].index.tolist())  # Splitting the dataset
         .label_from_df(cols=['DRC_0', 'DRC_1', 'DRC_2', 'DR_1', 'DR_2', 'DR_3', 'NPDR_score'], label_cls=partial(DRCategoryListWithScore, classes=['normal', 'NPDR_1', 'NPDR_2', 'NPDR_3', 'PDR'], one_hot=False))  # obtain labels from the level column
        ) # LabelList = ImageList + LabelList
 twenty_per_size = int(df['val'].sum())
 val_bs = twenty_per_size if twenty_per_size < 800 else 512
+
+tfms = get_transforms(do_flip=True, flip_vert=True, max_rotate=360, max_warp=0,
+                      max_zoom=1.1, max_lighting=0.1,
+                      p_lighting=0.5)
 data = (src.transform(tfms, size=sz, resize_method=ResizeMethod.SQUISH, padding_mode='zeros')  # Data augmentation
         .databunch(bs=bs, val_bs=val_bs, num_workers=2)  # DataBunch
-        .normalize(imagenet_stats)  # Normalize
         )
+
+def get_train_stats(databunch):
+    """
+    get mean and std of the training set
+    """
+    tdl = databunch.train_dl
+
+    stats = None
+    n = 0
+    for x, _ in tdl:
+        if stats is None:
+            stats = x.new_zeros((2, 3))
+
+        b_n = x.shape[0]
+        n += b_n
+        # need to record E(X^2) and E(X), for x^2
+        stats[0] += x.mean(dim=(0, 2, 3))*b_n
+        stats[1] += x.std (dim=(0, 2, 3))*b_n
+        print(stats)
+    stats /= n
+    return stats
+
+stats = ([0.4285, 0.2286, 0.0753], [0.2700, 0.1485, 0.0812])
+
+if stats is None:
+    stats = get_train_stats(data)
+    torch.save(stats, 'data_stats.pkl')
+
+DR_img_stats = stats
+#imagenet_stats is very different
+data = data.normalize((DR_img_stats[0], DR_img_stats[1]))  # Normalize just to mean, std of the data, as it is way too different with imagenet
+# this operation will add a transform to data pipeline
 # -
 
 src.valid.y
 
-
 # +
 #data.show_batch(rows=3, figsize=(7,6))
 train_dev_ratio = len(data.dl(DatasetType.Train).x) / len(data.dl(DatasetType.Valid).x)
-assert 3.9 < train_dev_ratio < 4.1
+assert 3.9 < train_dev_ratio < 4.1  # make sure it splits correctly
 # -
 
 
@@ -510,7 +513,7 @@ class DR_FocalLoss(nn.Module):
         self.fine_a = [self.a_NPDR_1, self.a_NPDR_2, self.a_NPDR_3]
 
         print(self.coarse_mag, self.fine_mag, self.fine_mag_not_added,
-              "alpha balancer here will be multiplied by negtive loss part",
+              "\nalpha balancer here will be multiplied by negtive loss part\n",
               self.coarse_a, self.fine_a)
         #self.device = torch.device('cuda:0')
         #self.coarse_a = torch.tensor([self.a_normal, self.a_NPDR, self.a_PDR], device=self.device)
@@ -658,7 +661,6 @@ def DR_learner(data: DataBunch, base_arch: Callable, cut: Union[int, Callable] =
     if pretrained: learn.freeze()
     if init: apply_init(model[1], init)
     return learn
-
 # -
 
 
@@ -757,7 +759,7 @@ if submitting_to_LB:
     max_lr_stage_1 = get_max_lr(learn)
 
 if max_lr_stage_1 is None or max_lr_stage_1 < 5e-4:
-    max_lr_stage_1 = 5e-3
+    max_lr_stage_1 = 5e-2
 train_triangular_lr(learn, inner_step=1, cycle_cnt=stage_1_cycle, max_lr=max_lr_stage_1)  # choose 3.31E-02 as suggested
 # -
 
@@ -874,13 +876,14 @@ valid_preds = (interp.preds, interp.y_true)
 
 optR = OptimizedRounder()
 cls_weight = cls_cnt[0]/cls_cnt
-#cls_weight = [1,1,1,1,1]
+# cls_weight = [1,1,1,1,1]
 cls_weight[0] *= 0.5
 cls_weight[1] *= 1.5
 cls_weight[2] *= 3
 cls_weight[3] *= 1  # overfit....
 cls_weight[4] *= 0.5  # overfit....
-optR.fit(valid_preds[0][:, -1], valid_preds[1], cls_weight=cls_weight)  #might overfit ...(but at V15 code, without it, performance is really bad)
+# might overfit ...(but at V15 code, without it, performance is really bad)
+optR.fit(valid_preds[0][:, -1], valid_preds[1], cls_weight=cls_weight)
 
 coefficients = optR.coefficients()
 # -
@@ -890,7 +893,8 @@ if submitting_to_LB:
     sample_df = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
     sample_df.head()
     learn.data.add_test(
-        ImageList.from_df(sample_df, '../input/aptos2019-blindness-detection', folder='test_images', suffix='.png'))
+        ImageList.from_df(sample_df, '../input/aptos2019-blindness-detection',
+                          folder='test_images', suffix='.png'))
 
     preds, y = learn.TTA(ds_type=DatasetType.Test)
     test_predictions = optR.predict(preds[:, -1], coefficients)
@@ -901,9 +905,12 @@ if submitting_to_LB:
     sample_df.to_csv('submission.csv', index=False)
 # -
 
+
 # +
 # use coefficients to predict
-interp.pred_class = torch.tensor(optR.predict(interp.preds[:,-1], coefficients).astype(np.int), dtype=torch.int64)
+interp.pred_class = torch.tensor(optR.predict(interp.preds[:, -1],
+                                 coefficients).astype(np.int),
+                                 dtype=torch.int64)
 print(interp.confusion_matrix())
 print(cohen_kappa_score(interp.pred_class, interp.y_true, weights='quadratic'))
 # -

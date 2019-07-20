@@ -20,3 +20,27 @@
 # todo
 1. more data training
 2. cv2 preprocessing
+
+## trials
+
+### + data mean for DR data
+4 freezed training
+
+epoch 	train_loss 	valid_loss 	quadratic_kappa 	time
+0 	4.714076 	6.048602 	0.229955 	09:36
+1 	3.571989 	3.295304 	0.690442 	09:25
+2 	2.915984 	2.985442 	0.791941 	09:28
+3 	2.374688 	1.966715 	0.850125 	09:28
+
+### repaired the loss function
+epoch,train_loss,valid_loss,quadratic_kappa,time
+0,6.090740,3.543248,0.781348,09:57 
+1,4.097026,2.938734,0.811764,09:37
+2,3.227793,2.403766,0.881219,09:29 
+3,2.720900,2.331233,0.874537,09:20 
+
+Local CV seems better.
+
+## hypothesis
+batch norm, remember the stats, so run longer and it is better?
+

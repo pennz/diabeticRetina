@@ -108,32 +108,35 @@ def prepare_for_party():
 prepare_for_party()
 
 
-def prepare_train_dev_df(df):
+def prepare_train_dev_df(df, cls_overlap="None_for_fine"):
     df['path'] = df['id_code'].map(lambda x: os.path.join(train_dir, '{}.png'.format(x)))
     df = df.drop(columns=['id_code'])
     df = df.sample(frac=1).reset_index(drop=True)  # shuffle dataframe
     #['normal', 'NPDR_1', 'NPDR_2', 'NPDR_3', 'PDR']
-    prefix = 'DR'
-    DR_fine_one_hot = pd.get_dummies(df['diagnosis'], prefix=prefix)
+    DR_fine_one_hot = pd.get_dummies(df['diagnosis'], prefix='DR')
     df = pd.concat([df, DR_fine_one_hot], axis=1)
 
     df['val'] = False
     for i in range(5):
-        name = f'{prefix}_{i}'
+        name = f'DR_{i}'
         val_sub_part = (df[name][df[name]==1]).sample(frac=0.2, replace=False)
         df.loc[val_sub_part.index, 'val'] = True
 
-    df['DR_3'][df['diagnosis'] == 4] = 1
-    df['DR_1'][df['DR_2'] == 1] = 1
-    df['DR_1'][df['DR_3'] == 1] = 1
-    df['DR_2'][df['DR_3'] == 1] = 1
+    if cls_overlap == 'None_for_fine':  # to preserve more information
+        pass
+    else:
+        df['DR_3'][df['diagnosis'] == 4] = 1  # could use label smooth, or mixup
+        df['DR_1'][df['DR_2'] == 1] = 1
+        df['DR_1'][df['DR_3'] == 1] = 1
+        df['DR_2'][df['DR_3'] == 1] = 1
 
     NPDR_index = (df['diagnosis'] < 4) & (df['diagnosis'] > 0)
 
     df['diagnosis_coarse'] = 0
-    df['diagnosis_coarse'][df['diagnosis'] == 0] = 0
-    df['diagnosis_coarse'][df['diagnosis'] == 4] = 2
-    df['diagnosis_coarse'][NPDR_index] = 1
+    df['diagnosis_coarse'][df['diagnosis'] == 0] = 0  # Normal
+    df['diagnosis_coarse'][NPDR_index] = 1            # NPDR
+    df['diagnosis_coarse'][df['diagnosis'] == 4] = 2  # PDR
+
     DR_coarse_one_hot = pd.get_dummies(df['diagnosis_coarse'], prefix='DRC')
     DR_coarse_one_hot['DRC_1'][DR_coarse_one_hot['DRC_2'] == 1] = 1
 
@@ -435,7 +438,7 @@ def convert_to_normal_pred(pred, thresholds):  # for batched data, still is the 
         return predict
 
 
-def quadratic_kappa(y_hat, y):
+def quadratic_kappa(y_hat, y, cls_weight=None):
     # need to convert our answer format
 
     coefficients = [0.5, 1.5, 2.5, 3.5]
@@ -444,7 +447,16 @@ def quadratic_kappa(y_hat, y):
 
     #cohen_kappa_score(y_hat, y,  weights='quadratic')
     #cohen_kappa_score(y_hat, y, labels=['normal', 'NPDR_1', 'NPDR_2', 'NPDR_3', 'PDR'], weights='quadratic')
-    return torch.tensor(cohen_kappa_score(y_hat, target, weights='quadratic'), device='cuda:0')
+    y = target
+    sample_weight = y.new_ones(y.size(), dtype=torch.float)
+
+    if cls_weight is not None:
+        reg_predict = y.clone().detach()
+        inds = [torch.nonzero(reg_predict == type_id).squeeze(1) for type_id in range(5)]
+        for type_id, ind in enumerate(inds):
+            sample_weight[ind] = cls_weight[type_id]
+
+    return torch.tensor(cohen_kappa_score(y_hat, target, weights='quadratic', sample_weight=sample_weight), device='cuda:0')
 # -
 
 
@@ -454,7 +466,8 @@ def quadratic_kappa(y_hat, y):
 # +
 # modified based https://github.com/DingKe/pytorch_workplace/blob/master/focalloss/loss.py
 class DR_FocalLoss(nn.Module):
-    def __init__(self, gamma: float = 0., eps=1e-7, from_logits=True, cls_cnt=None):
+    def __init__(self, gamma: float = 0., eps=1e-7, from_logits=True,
+                 cls_cnt=None, cls_overlap="None_for_fine"):
         super(DR_FocalLoss, self).__init__()
         self.gamma = gamma
         self.eps = eps
@@ -478,46 +491,49 @@ class DR_FocalLoss(nn.Module):
 
             PDR_cnt = 295
 
-        NPDR_3_added = NPDR_3_cnt + PDR_cnt  # PDR as NPDR3 ... not very good, anyway
-        NPDR_cnt_added = NPDR_1_cnt + NPDR_2_cnt + NPDR_3_added
-        coarse_cnt = normal_cnt + NPDR_cnt_added  # + PDR_cnt
+        s = normal_cnt + NPDR_1_cnt + NPDR_2_cnt + NPDR_3_cnt + PDR_cnt
+        fine_s = NPDR_1_cnt + NPDR_2_cnt + NPDR_3_cnt
 
-        self.a_normal = normal_cnt/(coarse_cnt - normal_cnt)  # pos_cnt/neg_cnt
-        self.a_NPDR = NPDR_cnt_added/(coarse_cnt - NPDR_cnt_added)
-        self.a_PDR = PDR_cnt/(coarse_cnt - PDR_cnt)
+        def cal_neg_coef(a,b,c, s=None):  # s can be passed if there is overlay in abc
+            if s is None: s = a + b + c
+            return [a/(s-a), b/(s-b), c/(s-c)]
 
-        NPDR_2_added = NPDR_2_cnt + NPDR_3_added
-        NPDR_1_added = NPDR_2_cnt + NPDR_3_added + NPDR_1_cnt
-        self.a_NPDR_1 = NPDR_1_added / (coarse_cnt-NPDR_1_added)
-        self.a_NPDR_2 = NPDR_2_added / (coarse_cnt-NPDR_2_added)
-        self.a_NPDR_3 = NPDR_3_added / (coarse_cnt-NPDR_3_added)
+        def cal_ratio(a,b,c,d):  # s can be passed if there is overlay in abc
+            return [a/b, a/c, a/d]
 
-        b_n_r = 1.
-        b_npdr_r = normal_cnt/NPDR_cnt_added
-        b_pdr_r = normal_cnt/PDR_cnt
+        #b_n_r, b_npdr_r, b_pdr_r = cal_ratio(normal_cnt, normal_cnt, fine_s, PDR_cnt)
+        #b_npdr1_r_not_added, b_npdr2_r_not_added, b_npdr3_r_not_added = \
+        #    cal_ratio(normal_cnt, NPDR_1_cnt, NPDR_2_cnt, NPDR_3_cnt)
+        #self.coarse_mag = [b_n_r, b_npdr_r, b_pdr_r]  # only [-1] is used
+        #self.fine_mag_not_added = [b_npdr1_r_not_added, b_npdr2_r_not_added, b_npdr3_r_not_added]
+        self.coarse_mag = cal_ratio(normal_cnt, normal_cnt, fine_s, PDR_cnt)
+        self.fine_mag_not_added = \
+            cal_ratio(normal_cnt, NPDR_1_cnt, NPDR_2_cnt, NPDR_3_cnt)
+        self.reg_mag = 2.  # overall loss for regression
 
-        b_npdr1_r = normal_cnt/NPDR_1_added
-        b_npdr2_r = normal_cnt/NPDR_2_added
-        b_npdr3_r = normal_cnt/NPDR_3_added
+        # following for alpha balancer
+        if cls_overlap == "None_for_fine":
+            NPDR_3_added = NPDR_3_cnt
+            NPDR_2_added = NPDR_2_cnt
+            NPDR_1_added = NPDR_1_cnt
+        else:
+            NPDR_3_added = NPDR_3_cnt + PDR_cnt  # PDR as NPDR3 ... not very good, anyway
+            NPDR_2_added = NPDR_2_cnt + NPDR_3_added
+            NPDR_1_added = NPDR_2_cnt + NPDR_3_added + NPDR_1_cnt
 
-        b_npdr1_r_not_added = normal_cnt/NPDR_1_cnt
-        b_npdr2_r_not_added = normal_cnt/NPDR_2_cnt
-        b_npdr3_r_not_added = normal_cnt/NPDR_3_cnt
+        NPDR_cnt_added_PDR = fine_s + PDR_cnt
+        #a_normal, a_NPDR, a_PDR = \
+        self.coarse_a = \
+            cal_neg_coef(normal_cnt, NPDR_cnt_added_PDR, PDR_cnt, s)
+        self.fine_a = \
+            cal_neg_coef(NPDR_1_added, NPDR_2_added, NPDR_3_added, NPDR_cnt_added_PDR)
+        # only used in balancing classification
+        self.fine_mag = \
+            cal_ratio(normal_cnt, NPDR_1_added, NPDR_2_added, NPDR_3_added)
 
-        self.coarse_mag = [b_n_r, b_npdr_r, b_pdr_r]
-        self.fine_mag = [b_npdr1_r, b_npdr2_r, b_npdr3_r]
-        self.fine_mag_not_added = [b_npdr1_r_not_added, b_npdr2_r_not_added, b_npdr3_r_not_added]
-        self.reg_mag = 2.
-
-        self.coarse_a = [self.a_normal, self.a_NPDR, self.a_PDR]
-        self.fine_a = [self.a_NPDR_1, self.a_NPDR_2, self.a_NPDR_3]
-
-        print(self.coarse_mag, self.fine_mag, self.fine_mag_not_added,
+        print('mag coef: ', [1.] + self.fine_mag_not_added + [self.coarse_mag[-1]],
               "\nalpha balancer here will be multiplied by negtive loss part\n",
-              self.coarse_a, self.fine_a)
-        #self.device = torch.device('cuda:0')
-        #self.coarse_a = torch.tensor([self.a_normal, self.a_NPDR, self.a_PDR], device=self.device)
-        #self.fine_a = torch.tensor([self.a_NPDR_1, self.a_NPDR_2, self.a_NPDR_3], device=self.device)
+              self.coarse_a, self.fine_a, self.fine_mag)
 
     @staticmethod
     def cal_balance_ratio_2_parts(pos, neg):
@@ -568,7 +584,7 @@ class DR_FocalLoss(nn.Module):
         reg_loss[NPDR3_inds_subset] *= self.fine_mag_not_added[2]
 
         #normal_inds_subset = torch.nonzero(coarse_target[:, 0] > 0).squeeze(1)
-        #reg_loss[normal_inds_subset] *= self.a_normal
+        #reg_loss[normal_inds_subset] *= a_normal
 
         PDR_inds_subset = torch.nonzero(coarse_target[:, 2] > 0).squeeze(1)
         reg_loss[PDR_inds_subset] *= self.coarse_mag[-1]
@@ -670,8 +686,23 @@ fl_normal = DR_FocalLoss(gamma=0., cls_cnt=cls_cnt)  # changed lr decay 2/0.15 +
 # set_trace() we convert back to ipynb
 # learner = DR_learner(data, vision.models.densenet121, metrics=[quadratic_kappa])
 #learn = cnn_learner(data, base_arch=models.resnet50, metrics=[quadratic_kappa])
-learn = DR_learner(data, vision.models.resnet50, cut=-1, loss_func=fl_normal, metrics=[quadratic_kappa],
-                     callback_fns=[partial(CSVLogger, append=True)])
+
+
+def get_cls_weight(cls_cnt, multiply=[1, 1, 1, 1, 1]):
+    cls_weight = cls_cnt[0]/cls_cnt
+    # cls_weight = [1,1,1,1,1]
+    assert len(cls_cnt) == len(multiply)
+    for i, m in enumerate(multiply):
+        cls_weight[i] *= m
+
+    return cls_weight
+
+
+cls_weight = get_cls_weight(cls_cnt, [0.5, 1.5, 3, 1, 0.5])
+
+learn = DR_learner(data, vision.models.resnet50, cut=-1, loss_func=fl_normal,
+                   metrics=[partial(quadratic_kappa, cls_weight=cls_weight)],
+                   callback_fns=[partial(CSVLogger, append=True)])
 
 # -
 
@@ -875,13 +906,6 @@ Learner.TTA = _TTA
 valid_preds = (interp.preds, interp.y_true)
 
 optR = OptimizedRounder()
-cls_weight = cls_cnt[0]/cls_cnt
-# cls_weight = [1,1,1,1,1]
-cls_weight[0] *= 0.5
-cls_weight[1] *= 1.5
-cls_weight[2] *= 3
-cls_weight[3] *= 1  # overfit....
-cls_weight[4] *= 0.5  # overfit....
 # might overfit ...(but at V15 code, without it, performance is really bad)
 optR.fit(valid_preds[0][:, -1], valid_preds[1], cls_weight=cls_weight)
 

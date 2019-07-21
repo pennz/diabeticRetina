@@ -35,7 +35,7 @@ fast_commit_with_commit_runing_less_data = True  # otherwise just exit
 random_world = True
 final_submission = False  # for disable random seed setting. Also, we can use all training data (no validation) for
                           # final submission
-
+do_lr_find = False
 try:
     sub = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
 except:
@@ -55,6 +55,7 @@ if fast_commit:
         submitting_to_LB = True
 else:  # pretending/testing for submitting to LB
     submitting_to_LB = True
+    do_lr_find = True
 # -
 
 # +
@@ -132,13 +133,13 @@ def prepare_train_dev_df(df, cls_overlap="None_for_fine"):
 
     NPDR_index = (df['diagnosis'] < 4) & (df['diagnosis'] > 0)
 
-    df['diagnosis_coarse'] = 0
+    df['diagnosis_coarse'] = 1
     df['diagnosis_coarse'][df['diagnosis'] == 0] = 0  # Normal
     df['diagnosis_coarse'][NPDR_index] = 1            # NPDR
     df['diagnosis_coarse'][df['diagnosis'] == 4] = 2  # PDR
 
     DR_coarse_one_hot = pd.get_dummies(df['diagnosis_coarse'], prefix='DRC')
-    DR_coarse_one_hot['DRC_1'][DR_coarse_one_hot['DRC_2'] == 1] = 1
+    #DR_coarse_one_hot['DRC_1'][DR_coarse_one_hot['DRC_2'] == 1] = 1
 
     # score_index = NPDR_index | (df['diagnosis']==4)
     # df['NPDR_score'] = np.NaN
@@ -506,9 +507,11 @@ class DR_FocalLoss(nn.Module):
         #    cal_ratio(normal_cnt, NPDR_1_cnt, NPDR_2_cnt, NPDR_3_cnt)
         #self.coarse_mag = [b_n_r, b_npdr_r, b_pdr_r]  # only [-1] is used
         #self.fine_mag_not_added = [b_npdr1_r_not_added, b_npdr2_r_not_added, b_npdr3_r_not_added]
-        self.coarse_mag = cal_ratio(normal_cnt, normal_cnt, fine_s, PDR_cnt)
+        base_cnt = NPDR_2_cnt
+
+        self.coarse_mag = cal_ratio(base_cnt, normal_cnt, fine_s, PDR_cnt)
         self.fine_mag_not_added = \
-            cal_ratio(normal_cnt, NPDR_1_cnt, NPDR_2_cnt, NPDR_3_cnt)
+            cal_ratio(base_cnt, NPDR_1_cnt, NPDR_2_cnt, NPDR_3_cnt)
         self.reg_mag = 2.  # overall loss for regression
 
         # following for alpha balancer
@@ -521,7 +524,7 @@ class DR_FocalLoss(nn.Module):
             NPDR_2_added = NPDR_2_cnt + NPDR_3_added
             NPDR_1_added = NPDR_2_cnt + NPDR_3_added + NPDR_1_cnt
 
-        NPDR_cnt_added_PDR = fine_s + PDR_cnt
+        NPDR_cnt_added_PDR = fine_s  # + PDR_cnt
         #a_normal, a_NPDR, a_PDR = \
         self.coarse_a = \
             cal_neg_coef(normal_cnt, NPDR_cnt_added_PDR, PDR_cnt, s)
@@ -529,9 +532,10 @@ class DR_FocalLoss(nn.Module):
             cal_neg_coef(NPDR_1_added, NPDR_2_added, NPDR_3_added, NPDR_cnt_added_PDR)
         # only used in balancing classification
         self.fine_mag = \
-            cal_ratio(normal_cnt, NPDR_1_added, NPDR_2_added, NPDR_3_added)
+            cal_ratio(base_cnt, NPDR_1_added, NPDR_2_added, NPDR_3_added)
 
-        print('mag coef: ', [1.] + self.fine_mag_not_added + [self.coarse_mag[-1]],
+        print('mag coef: ',
+              [self.coarse_mag[0] + self.fine_mag_not_added + [self.coarse_mag[-1]],
               "\nalpha balancer here will be multiplied by negtive loss part\n",
               self.coarse_a, self.fine_a, self.fine_mag)
 
@@ -698,7 +702,8 @@ def get_cls_weight(cls_cnt, multiply=[1, 1, 1, 1, 1]):
     return cls_weight
 
 
-cls_weight = get_cls_weight(cls_cnt, [0.5, 1.5, 3, 1, 0.5])
+#cls_weight = get_cls_weight(cls_cnt, [0.5, 1.5, 3, 1, 0.5])
+cls_weight = get_cls_weight(cls_cnt)
 
 learn = DR_learner(data, vision.models.resnet50, cut=-1, loss_func=fl_normal,
                    metrics=[partial(quadratic_kappa, cls_weight=cls_weight)],
@@ -762,7 +767,7 @@ cmdstr = 'sh ./log_tel.sh'
 
 # -
 # +
-if submitting_to_LB:
+if submitting_to_LB and do_lr_find:
     train_triangular_lr(learn, inner_step=0)
 # -
 
@@ -786,16 +791,16 @@ def get_max_lr(learn):
 stage_1_cycle = 4 if not use_less_train_data else 1
 
 max_lr_stage_1 = None
-if submitting_to_LB:
+if submitting_to_LB and do_lr_find:
     max_lr_stage_1 = get_max_lr(learn)
 
 if max_lr_stage_1 is None or max_lr_stage_1 < 5e-4:
-    max_lr_stage_1 = 5e-2
+    max_lr_stage_1 = 1e-2
 train_triangular_lr(learn, inner_step=1, cycle_cnt=stage_1_cycle, max_lr=max_lr_stage_1)  # choose 3.31E-02 as suggested
 # -
 
 # + 
-if submitting_to_LB:
+if submitting_to_LB and do_lr_find:
     train_triangular_lr(learn, inner_step=2)  # choose 3.31E-02 as suggested
 # -
 
@@ -803,11 +808,11 @@ if submitting_to_LB:
 stage_2_cycle = 6 if not use_less_train_data else 1
 
 max_lr_stage_2 = None
-if submitting_to_LB:  # need to check, otherwise will use the one from stage_1 training....
+if submitting_to_LB and do_lr_find:
     max_lr_stage_2 = get_max_lr(learn)
 
 if max_lr_stage_2 is None or max_lr_stage_2 < 1e-6:
-    max_lr_stage_2 = 1e-6
+    max_lr_stage_2 = 5e-5
 last_layer_lr_scale_down = 10.
 
 last_layer_max_lr_stage_2 = max_lr_stage_1 / last_layer_lr_scale_down
@@ -890,7 +895,7 @@ def _TTA(learn: Learner, beta: float = 0, ds_type: DatasetType = DatasetType.Val
         return preds, avg_preds, y
     else:
         final_preds = preds * beta + avg_preds * (1 - beta)
-        if with_loss:
+        if with_loss: and do_lr_find
             with NoneReduceOnCPU(learn.loss_func) as lf: loss = lf(final_preds, y)
             return final_preds, y, loss
         return final_preds, y

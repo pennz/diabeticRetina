@@ -2,11 +2,19 @@
 # coding: utf-8
 # +
 import os
+from pathlib import Path
+import math
 import numpy as np
 import pandas as pd
 import scipy as sp
 from functools import partial
 from sklearn.metrics import cohen_kappa_score
+
+# for image preprocessing
+import cv2
+#import imutils
+from torchvision.transforms import ToPILImage
+from shutil import copyfile
 
 import torch
 from fastai import *
@@ -55,7 +63,7 @@ if fast_commit:
         submitting_to_LB = True
 else:  # pretending/testing for submitting to LB
     submitting_to_LB = True
-    do_lr_find = True
+    #do_lr_find = True
 # -
 
 # +
@@ -67,6 +75,20 @@ else:  # pretending/testing for submitting to LB
 
 # ## Utils functions
 # helpful functions, for debugging mainly
+
+
+# +
+# not used...
+def binary_search_img(start, end, f, steps_to_stop):  # we could use the contour information!!
+    if start >= end: return start
+    if steps_to_stop <= 0:
+        raise RuntimeError("Image is strange, cannot find right box")
+    mid = (start+end) // 2
+    res = f(mid)
+    if res == 0: return mid
+    return binary_search_img(mid+1, end, f, steps_to_stop-1) if res < 0 else \
+        binary_search_img(start, mid-1, f, steps_to_stop-1)
+# -
 # ## Seeding, data preparation
 
 
@@ -86,7 +108,7 @@ os.listdir('../input')
 # -
 
 # +
-#import pdb
+import pdb
 #import torchsnooper
 #import pysnooper
 
@@ -107,6 +129,339 @@ def prepare_for_party():
         seed_everything(SEED)
 
 prepare_for_party()
+
+def check_image_list_dist(subfolder):
+    path_data = Path('../input/aptos2019-blindness-detection')
+
+    il = ImageList.from_folder(path_data/subfolder)
+
+    img_size_stats = {}
+    target_blk = []
+    for img in il:
+        s = tuple(img.size)
+        stat = img_size_stats.setdefault(s, 0)
+        img_size_stats[s] = stat + 1
+        if s[0] == 480:
+            bc=get_diag_black_cnt(img)
+            target_blk.append(bc)
+            print(bc)
+    return img_size_stats, target_blk
+
+test_img_size_stats = {(1958, 2588): 134,
+                       (480, 640): 1403,  # 3/4
+                       (1736, 2416): 225,
+                       (1050, 1050): 69,
+                       (1944, 2896): 11,
+                       (1110, 1467): 2,
+                       (1944, 2592): 6,
+                       (614, 819): 45,  # around 3/4
+                       (576, 768): 2,
+                       (1536, 2048): 28,
+                       (1117, 1476): 2,
+                       (1764, 2146): 1}
+# check_image_list_dist('train_images')
+train_img_size_stats = {(2136, 3216): 410,
+                        (1958, 2588): 533,
+                        (1536, 2048): 351,
+                        (2848, 4288): 52,
+                        (1736, 2416): 638,
+                        (1050, 1050): 974,
+                        (1000, 1504): 92,
+                        (614, 819): 287,
+                        (1226, 1844): 61,
+                        (1424, 2144): 28,
+                        (1944, 2896): 34,
+                        (480, 640): 42,
+                        (2588, 3388): 141,
+                        (1117, 1476): 14,
+                        (1110, 1467): 2,
+                        (358, 474): 2,
+                        (1764, 2146): 1}
+# way too different !!!!
+# so we just take care of the types with > 30 imgs
+# for test 480*640 images, the get_diag_black_cnt number is (137.77405559515324, 3.369116330637486)
+
+# to preprocess our data: we do this:
+# 1. cv2 find the contour
+# 2. find the center
+# 3. use 3/4 crop, binarysearch, until the black margin we wanted is got (we can count the black pixels around the diagonal)
+# 4. done
+def get_diag_black_cnt(img):
+    assert img.data.dtype == torch.float32
+    img_r = img.data[0]  # only need to look R channle, most information
+
+    thresh = img_r.mean()/10  # in tensor the value is in range 0 ~ 1
+    def blk_cnt(t):
+        return sum((dig<thresh).sum() for dig in [t.diagonal(),t.diagonal(offset=5),t.diagonal(offset=-5)])
+    img_r_flip = img_r.flip((1))
+
+    return blk_cnt(img_r) + blk_cnt(img_r_flip)
+
+
+def get_tensor_diag_black_cnt(img):
+    assert img.dtype == torch.float32
+
+    img_r = img[0]  # only need to look R channle, most information
+
+    thresh = img_r.mean()/10  # in tensor the value is in range 0 ~ 1
+    def blk_cnt(t):
+        return sum((dig<thresh).sum() for dig in [t.diagonal(),t.diagonal(offset=5),t.diagonal(offset=-5)])
+    img_r_flip = img_r.flip((1))
+
+    return blk_cnt(img_r) + blk_cnt(img_r_flip)
+
+
+def fastai_img_2_cv2(img): return (image2np(img.data)*255).astype(np.uint8)
+
+
+def find_center(image, cnt_thresh=20):  # return list, need to post process, should be around center
+    """ Thanks to https://www.pyimagesearch.com/2016/02/01/opencv-center-of-contour/ """
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    thresh = cv2.threshold(blurred, cnt_thresh, 255, cv2.THRESH_BINARY)[1]
+
+    cnts = cv2.findContours(thresh, cv2.RETR_EXTERNAL,
+                            cv2.CHAIN_APPROX_SIMPLE)
+    cnts = imutils.grab_contours(cnts)
+    # loop over the contours
+    cs = []
+    clen = np.array([len(c) for c in cnts])
+    mid = np.argmax(clen)
+    
+    for c in [cnts[mid]]:
+        # compute the center of the contour
+        if len(c) < 5:
+            return None
+        M = cv2.moments(c)
+        cX = int(M["m10"] / M["m00"])
+        cY = int(M["m01"] / M["m00"])
+        cs.append((cX, cY, c))
+    return cs
+
+
+def find_DR_center(img, thresh=20):
+    cs = find_center(fastai_img_2_cv2(img), cnt_thresh=thresh)
+    if cs is None:
+        return None, None, None
+    h, w = img.size
+    for cx, cy, c in cs:
+        if w/3 <= cx <= 2*w/3 and h/3 <= cy <= 2*h/3:
+            return cx, cy, c  # width, height correspondingly
+    return None, None, None
+
+
+def find_box_from_center(img, ratio=3/4, bc=137.774, bc_std=3.369, thresh=20):  # should put in a class
+    """ratio here, 3 height - 4 width (3y, 4x)
+    """
+    h, w = img.size
+
+    def contour_range(cx, cy, c):
+        xs = c[:,0,0]
+        ys = c[:,0,1]
+        xs_rel = xs - cx
+        ys_rel = ys - cy
+        ratio = xs_rel*3 - ys_rel*4  # minimum one
+        sid = np.argsort(np.absolute(ratio))
+        xid = sid[0]
+        xid_d = None
+        for i in sid[1:]:
+            if abs(i-xid) < 5:  # just use the trick, as they can't be that close
+                continue
+            else:
+                xid_d = i
+                break
+        if xid_d is None:
+            raise RuntimeError("Image Strange, cannot find right contour points")
+        c1, c2 = (xs[xid], ys[xid]), (xs[xid_d], ys[xid_d])
+        if c1[0]*c1[1] > c2[0]*c2[0]:
+            c2, c1 = c1, c2
+        return xs.max(), xs.min(), ys.max(), ys.min(), c1, c2
+
+    cx, cy, c = find_DR_center(img, thresh=thresh)
+    if cx is None: return None
+    xmax, xmin, ymax, ymin, cross, cross2 = contour_range(cx, cy, c)
+
+    def find_box_from_cross_points(c1,c2, ratio, expand=28/400):
+        # for 480*640, 137.7 ... we just test more times...
+        #138/6 = 23, and the r is around 480/2/3*5 = 800/2=400, so it is about 25/400 more
+        # so for h,w, both add these
+        width_inner = c2[0] - c1[0]
+        width_e = width_inner * expand/2
+        hight_e = width_e*ratio
+        width_e = int(width_e)
+        hight_e = int(hight_e)
+        c1[0] -= width_e
+        c2[0] += width_e
+        c1[1] -= hight_e
+        c2[1] += hight_e
+        return c1, c2
+    def clip(h,w, c):
+        x=c[0]
+        y=c[1]
+        x = x if x > 0 else 0
+        y = y if y > 0 else 0
+        x = x if x < w else w
+        y = y if y < h else h
+        return x, y
+    c1,c2 = find_box_from_cross_points(list(cross), list(cross2), ratio)
+    c1 = clip(h,w,c1)
+    c2 = clip(h,w,c2)
+
+    bbox = [c1[1], c1[0],c2[1], c2[0]]
+
+    cnt = get_tensor_diag_black_cnt(img.data[:,c1[1]:c2[1],c1[0]:c2[0]])
+    print(cnt)
+    if cnt == 0:
+        print("Image Strange, cannot find black points in diagonals")
+
+    return ImageBBox.create(h,w, [bbox], labels=[0], classes=['ROI']), bbox
+    #ch = cy
+    #cw = cx
+    #h_range = min(ch-ymin, ymax-ch)  # half box height up limit
+    #h_start = abs(ch-cross[1])
+    #if h_start > h_range:
+    #    raise RuntimeError("Image is strange, cannot find right box")
+    #w_range = min(cw-xmin, xmax-cw)
+    # start from a more likely place, 2/h_range
+
+    #def check_blk_cnt_center_crop(h_add):
+    #    w_add = int(h_add/ratio)
+    #    cnt = get_tensor_diag_black_cnt(img.data[:,ch-h_add:ch+h_add,cw-w_add:cw+w_add])
+    #    ub = (bc+bc_std)/480
+    #    lb = (bc-bc_std)/480
+    #    r = cnt.float() / (2*h_add)
+    #    if r > ub: return 1
+    #    if r < lb: return -1
+    #    return 0
+
+    # max_rounds = math.floor(math.log2(h_range-h_start))
+    # h_proposed = binary_search_img(h_start, h_range, check_blk_cnt_center_crop, max_rounds)
+    # binary search in this situation is not stable, as some image width not enough, so the
+    # diagonal calculation will be incorrect
+    #
+    # easier way, just use the cross points, and add a few pixel margin
+    #w_ = int(h_proposed * 4/3)
+    #w_ = w_ if w_ < w_range else w_range
+    # top left bottem rightb    
+    #return ImageBBox.create(h,w, [[ch-h_proposed, cw-w_, ch+h_proposed, cw+w_]], labels=[0], classes=['ROI']), [ch-h_proposed, cw-w_, ch+h_proposed, cw+w_]
+    #return [ch-h_proposed, cw-w_, ch+h_proposed, cw+w_]
+
+# -
+# +
+errorsones=[]  # to put together and need to handle later
+def check_crop(subfolder):
+    path_data = Path('../input/aptos2019-blindness-detection')
+    cwd = Path('.')
+    topil = ToPILImage()
+
+    il = ImageList.from_folder(path_data/subfolder)
+    to_save_path = cwd/(subfolder+'_cropped')
+    to_save_path_resized = cwd/(subfolder+'_cropped'+'_resized')
+    to_save_path_resized.mkdir()
+    to_save_path.mkdir()
+
+    cotinue_f=False
+    for i, img in enumerate(il):
+        fname = il.items[i]
+        name_before_resize = to_save_path/fname.name
+        name_after_resize = to_save_path_resized/fname.name
+
+        if fname.name != '81914ceb4e74.png' and cotinue_f: 
+            continue
+        if cotinue_f:
+            cotinue_f = False
+            continue
+
+        s = tuple(img.size)
+        if s[0] != 480:
+            try:
+                _, coords = find_box_from_center(img)
+                print(coords, name_before_resize)
+                pilimg=topil(img.data[:,coords[0]:coords[2],coords[1]:coords[3]])
+                pilimg.save(name_before_resize)
+                pilimg_r = pilimg.resize((640, 480))  # weight, height
+                pilimg_r.save(name_after_resize)
+                del pilimg_r
+                del pilimg
+            except Exception as e:
+                print(e)
+                print(fname.name, " error happened")
+                errorsones.append(fname.name)
+            #break
+        else:
+            copyfile(fname, name_before_resize)
+            copyfile(fname, name_after_resize)
+from tqdm import tqdm
+errorsones=[]  # to put together and need to handle later
+def check_crop_namelist(ns):
+    subfolder='train_images'
+    path_data = Path('../input/aptos2019-blindness-detection')/subfolder
+    cwd = Path('.')
+    topil = ToPILImage()
+
+    to_save_path = cwd/(subfolder+'_cropped')
+    to_save_path_resized = cwd/(subfolder+'_cropped'+'_resized')
+    to_save_path_resized.mkdir(parents=True, exist_ok=True)
+    to_save_path.mkdir(parents=True, exist_ok=True)
+
+    for imgname in tqdm(ns):
+        fname = path_data/imgname
+        name_before_resize = to_save_path/fname.name
+        name_after_resize = to_save_path_resized/fname.name
+
+        img = open_image(fname)
+        s = tuple(img.size)
+        if s[0] != 480:
+            try:
+                _, coords = find_box_from_center(img, thresh=10)  # use small thresh, maybe helpful -> much better
+                print(coords, name_before_resize)
+                pilimg=topil(img.data[:,coords[0]:coords[2],coords[1]:coords[3]])
+                pilimg.save(name_before_resize)
+                pilimg_r = pilimg.resize((640, 480))  # weight, height
+                pilimg_r.save(name_after_resize)
+                del pilimg_r
+                del pilimg
+            except Exception as e:
+                print(e)
+                print(fname.name, " error happened")
+                errorsones.append(fname20.name)
+            #break
+        else:
+            copyfile(fname, name_before_resize)
+            copyfile(fname, name_after_resize)
+
+still_need_to_handle = [
+ '033f2b43de6d.png',
+ '3a6e9730b298.png',
+ 'df4913ca3712.png',
+ 'f002ce614c59.png',
+ '4860f7813654.png',
+ 'ac720570dd0f.png',
+ '807135cbc438.png',
+ 'e1418d28d668.png',
+ '42a67337fa8e.png',
+ '17d997fe1090.png',
+ '64fedbf97473.png',
+ 'd51b3fe0fa1b.png',
+ '6f4719c6bb4b.png',
+ 'c58971bcebb2.png',
+ '5548a7961a3e.png',
+ '7214fc7cbe03.png',
+ '7269a1d84a57.png',
+ '2c77bf969079.png',
+ 'e821c1b6417a.png',
+ 'b665041e1633.png',
+ '417f408ee8e0.png',
+ '6b7cf869622a.png',
+ '66d2ca47aa44.png',
+ '6cb96a6fb029.png',
+ '50d8a8fb7737.png',
+ '541db13517e2.png',
+ '5b301a6d1ac7.png',
+ 'f64214bed40e.png',
+ '2bb3c492d6d3.png']
+#check_crop_namelist(still_need_to_handle)
+# -
 
 
 def prepare_train_dev_df(df, cls_overlap="None_for_fine"):
@@ -164,6 +519,21 @@ if use_less_train_data:
     df = df.sample(frac=0.1).copy()
 
 df = prepare_train_dev_df(df)
+#newpath = "../input/dr-cropped/dr_train_images_cropped_resized/train_images_cropped_resized/"
+
+
+def replace_image_cropped(df, from_folder, to_folder):
+    # path, f62b8a076833.png is truncted, so remove it
+    df['path'] = df['path'].str.replace(from_folder, to_folder, regex=False)
+    return df[~df['path'].str.contains('f62b8a076833')]
+
+
+
+df = replace_image_cropped(df,
+    'aptos2019-blindness-detection/train_images',
+    #'dr-cropped/dr_train_images_cropped_resized/train_images_cropped_resized')
+    'dr-cropped/dr_train_images_cropped')
+
 
 # This is actually very small. The [previous competition](https://kaggle.com/c/diabetic-retinopathy-detection) had ~35k images, which supports the idea that pretraining on that dataset may be quite beneficial.
 
@@ -276,10 +646,10 @@ src = (ImageList.from_df(df=df, path='./', cols='path')  # get dataset from data
 twenty_per_size = int(df['val'].sum())
 val_bs = twenty_per_size if twenty_per_size < 800 else 512
 
-tfms = get_transforms(do_flip=True, flip_vert=True, max_rotate=360, max_warp=0,
-                      max_zoom=1.1, max_lighting=0.1,
+tfms = get_transforms(do_flip=True, flip_vert=True, max_rotate=180, max_warp=None,
+                      max_zoom=0.9, p_affine=0.5, max_lighting=0.1,
                       p_lighting=0.5)
-data = (src.transform(tfms, size=sz, resize_method=ResizeMethod.SQUISH, padding_mode='zeros')  # Data augmentation
+data = (src.transform(tfms, size=sz, resize_method=ResizeMethod.CROP, padding_mode='reflection')  # Data augmentation
         .databunch(bs=bs, val_bs=val_bs, num_workers=2)  # DataBunch
         )
 
@@ -304,7 +674,8 @@ def get_train_stats(databunch):
     stats /= n
     return stats
 
-stats = ([0.4285, 0.2286, 0.0753], [0.2700, 0.1485, 0.0812])
+#stats = ([0.4285, 0.2286, 0.0753], [0.2700, 0.1485, 0.0812])  # before crop
+stats = ([0.5744, 0.3018, 0.0930], [0.1676, 0.1002, 0.0805])  # after crop
 
 if stats is None:
     stats = get_train_stats(data)
@@ -316,10 +687,9 @@ data = data.normalize((DR_img_stats[0], DR_img_stats[1]))  # Normalize just to m
 # this operation will add a transform to data pipeline
 # -
 
-src.valid.y
+data.show_batch(rows=3, figsize=(7,6))
 
 # +
-#data.show_batch(rows=3, figsize=(7,6))
 train_dev_ratio = len(data.dl(DatasetType.Train).x) / len(data.dl(DatasetType.Valid).x)
 assert 3.9 < train_dev_ratio < 4.1  # make sure it splits correctly
 # -
@@ -439,15 +809,18 @@ def convert_to_normal_pred(pred, thresholds):  # for batched data, still is the 
         return predict
 
 
-def quadratic_kappa(y_hat, y, cls_weight=None):
+def quadratic_kappa(y_hat, y, cls_weight=None, y_hat_predicted=False):
     # need to convert our answer format
 
-    coefficients = [0.5, 1.5, 2.5, 3.5]
-    y_hat = convert_to_normal_pred(y_hat, coefficients)
-    target = y[:, -1].int()
+    if not y_hat_predicted:
+        coefficients = [0.5, 1.5, 2.5, 3.5]
+        y_hat = convert_to_normal_pred(y_hat, coefficients)
 
-    #cohen_kappa_score(y_hat, y,  weights='quadratic')
-    #cohen_kappa_score(y_hat, y, labels=['normal', 'NPDR_1', 'NPDR_2', 'NPDR_3', 'PDR'], weights='quadratic')
+    if len(y.shape) < 2:
+        target = y
+    else:
+        target = y[:, -1].int()
+
     y = target
     sample_weight = y.new_ones(y.size(), dtype=torch.float)
 
@@ -535,7 +908,7 @@ class DR_FocalLoss(nn.Module):
             cal_ratio(base_cnt, NPDR_1_added, NPDR_2_added, NPDR_3_added)
 
         print('mag coef: ',
-              [self.coarse_mag[0] + self.fine_mag_not_added + [self.coarse_mag[-1]],
+              [self.coarse_mag[0]] + self.fine_mag_not_added + [self.coarse_mag[-1]],
               "\nalpha balancer here will be multiplied by negtive loss part\n",
               self.coarse_a, self.fine_a, self.fine_mag)
 
@@ -889,13 +1262,18 @@ def _TTA(learn: Learner, beta: float = 0, ds_type: DatasetType = DatasetType.Val
          with_loss: bool = False) -> Tensors:
     "Applies TTA to predict on `ds_type` dataset."
     preds, y = learn.get_preds(ds_type)
-    all_preds = list(learn.tta_only(ds_type=ds_type, num_pred=num_pred))
-    avg_preds = torch.stack(all_preds).mean(0)
     if beta is None:
+        all_preds = list(learn.tta_only(ds_type=ds_type, num_pred=num_pred))
+        avg_preds = torch.stack(all_preds).mean(0)
         return preds, avg_preds, y
     else:
-        final_preds = preds * beta + avg_preds * (1 - beta)
-        if with_loss: and do_lr_find
+        if beta == 1.:
+            final_preds = preds
+        else:
+            avg_preds = torch.stack(all_preds).mean(0)
+            all_preds = list(learn.tta_only(ds_type=ds_type, num_pred=num_pred))
+            final_preds = preds * beta + avg_preds * (1 - beta)
+        if with_loss:
             with NoneReduceOnCPU(learn.loss_func) as lf: loss = lf(final_preds, y)
             return final_preds, y, loss
         return final_preds, y
@@ -915,31 +1293,41 @@ optR = OptimizedRounder()
 optR.fit(valid_preds[0][:, -1], valid_preds[1], cls_weight=cls_weight)
 
 coefficients = optR.coefficients()
+coefficients
 # -
 
 # +
-if submitting_to_LB:
-    sample_df = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
-    sample_df.head()
+test_predictions = None
+sample_df = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
+
+
+def preds_for_test(learn, sample_df, optR, coefficients):
     learn.data.add_test(
         ImageList.from_df(sample_df, '../input/aptos2019-blindness-detection',
                           folder='test_images', suffix='.png'))
 
-    preds, y = learn.TTA(ds_type=DatasetType.Test)
+    preds, y = learn.TTA(ds_type=DatasetType.Test, beta=1.)
     test_predictions = optR.predict(preds[:, -1], coefficients)
-
-    sample_df.diagnosis = test_predictions.astype(int)
-    sample_df.head()
-
-    sample_df.to_csv('submission.csv', index=False)
+    return test_predictions
 # -
+# +
 
+if submitting_to_LB:
+    if test_predictions is None: test_predictions = preds_for_test(learn, sample_df, optR, coefficients)
+    sample_df.diagnosis = test_predictions.astype(int)
+    sample_df.to_csv('submission.csv', index=False)
+
+    sample_df.head()
+# -
 
 # +
 # use coefficients to predict
 interp.pred_class = torch.tensor(optR.predict(interp.preds[:, -1],
                                  coefficients).astype(np.int),
                                  dtype=torch.int64)
-print(interp.confusion_matrix())
-print(cohen_kappa_score(interp.pred_class, interp.y_true, weights='quadratic'))
 # -
+# +
+print(interp.confusion_matrix())
+print(quadratic_kappa(interp.pred_class, interp.y_true, cls_weight=cls_weight, y_hat_predicted=True))
+# -
+

@@ -12,7 +12,8 @@
   ],
   "dataset_sources": [
     "pytorch/resnet50",
-    "tanlikesmath/diabetic-retinopathy-resized"
+    "tanlikesmath/diabetic-retinopathy-resized",
+    "k1gaggle/dr-cropped"
   ],
   "kernel_sources": [],
   "competition_sources": [

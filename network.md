@@ -18,8 +18,9 @@
 回归的话，是
 
 # todo
-1. more data training
-2. cv2 preprocessing
+1. more data training (balance different class)
+2. cv2 preprocessing, remove the black part
+3. data norm thing
 
 ## trials
 

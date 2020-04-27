@@ -73,13 +73,15 @@ And this is resnet 50. check the 'res50-result.ipynb', could train longer
 另外，我的pulic test set的预测结果，说明test里面很多NPDR2,NPDR3的，以及PDR的。
 所以之后数据往这几类多填充填充
 
-todo : 
+todo: 
 - if you have resized images on local computer make sure you do same resizing when you use Kaggle kernel for submission 
 - follow and reimplement what the winner got
 - write testsuit for automation thing
 # just check the great one, and try to replicate it
 
 my previous resutl:
-0.723, need to improve. Previous direction is not right.
+0.723, need to improve. Previous direction is not right! just merge more model, then it will be fine
 for quick loopback, edit locally and separate well, for better tesing (with local configuration maybe)
 set mail stone, and check if it is done
+
+

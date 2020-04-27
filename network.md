@@ -18,7 +18,7 @@
 回归的话，是
 
 # todo
-1. more data training (balance different class)
+1. more data training (balance different class) (for crop, use cropped ones, just do more cropping)
 2. cv2 preprocessing, remove the black part
 3. data norm thing
 

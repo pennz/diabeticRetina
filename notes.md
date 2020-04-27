@@ -48,3 +48,36 @@ As the disease progresses, it may evolve into proliferative diabetic retinopathy
 
 Four stages: mild->moderate->severe->proliferactive
 
+# 1st place solution
+## Validation Strategy
+I made the decision to combine the whole 2015 and 2019 data as train set, and solely relied on public LB for validation.
+## Preprocessing
+no need, resolution is fine
+## Models and input sizes
+2 x inception_resnet_v2, input size 512
+2 x inception_v4, input size 512
+2 x seresnext50, input size 512
+2 x seresnext101, input size 384
+*Inceptions and ResNets usually blend well. If I could have two more weeks I would definitely add some EfficientNets. *
+
+The input size was mainly determined by observations in the 2015 competition that larger input size brought better performance. 
+## Loss, Augmentations, Pooling
+I used only nn.SmoothL1Loss() as the loss function. Other loss functions may work well too. I sticked to this single loss just to simplify the emsembling process.
+```
+contrast_range=0.2,
+brightness_range=20.,
+hue_range=10.,
+saturation_range=20.,
+blur_and_sharpen=True,
+rotate_range=180.,
+scale_range=0.2,
+shear_range=0.2,
+shift_range=0.2,
+do_mirror=True,
+```
+For the last pooling layer, I found the generalized mean pooling (https://arxiv.org/pdf/1711.02512.pdf) better than the original average pooling. Code copied from https://github.com/filipradenovic/cnnimageretrieval-pytorch.
+
+## Training and Testing
+### two stage training
+- routinely trained the eight models and validated each of them on the public LB (To get more stable results, models were evaluated in pairs (with different seeds), that's why I have 2x for each type of model. )(When probing LB, I tried to reduce the degree of freedom of hyperparemeters to alleviate overfitting, for example, to determine the best number of epochs for training I used a step size of five. )
+- In the second stage of training, I added pseudo-labelled (soft version) public test data and two additional external data - the Idrid and the Messidor dataset, to the stage1 trainset.

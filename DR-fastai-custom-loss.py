@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 # coding: utf-8
 # +
+from tqdm import tqdm
+from subprocess import Popen, PIPE
+from io import StringIO
+from PIL import Image
+import pdb
 import os
 from pathlib import Path
 import math
@@ -37,15 +42,17 @@ from IPython.core.debugger import set_trace
 
 # but it is recommended to first set `fast_commit` to false first and the kernel will run with only partial data to
 # check if there is bug in the code.
-fast_commit = True  # commit just to check run OK, we can use this for debugging. Write unittest suit in this jupyter notebook
+fast_commit = False  # commit just to check run OK, we can use this for debugging. Write unittest suit in this jupyter notebook
 fast_commit_with_commit_runing_less_data = True  # otherwise just exit
 
 random_world = True
-final_submission = False  # for disable random seed setting. Also, we can use all training data (no validation) for
-                          # final submission
+# for disable random seed setting. Also, we can use all training data (no validation) for
+final_submission = False
+# final submission
 do_lr_find = False
 try:
-    sub = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
+    sub = pd.read_csv(
+        '../input/aptos2019-blindness-detection/sample_submission.csv')
 except:
     sub = pd.read_csv('../input/sample_submission.csv')
 
@@ -79,13 +86,16 @@ else:  # pretending/testing for submitting to LB
 
 # +
 # not used...
-def binary_search_img(start, end, f, steps_to_stop):  # we could use the contour information!!
-    if start >= end: return start
+# we could use the contour information!!
+def binary_search_img(start, end, f, steps_to_stop):
+    if start >= end:
+        return start
     if steps_to_stop <= 0:
         raise RuntimeError("Image is strange, cannot find right box")
     mid = (start+end) // 2
     res = f(mid)
-    if res == 0: return mid
+    if res == 0:
+        return mid
     return binary_search_img(mid+1, end, f, steps_to_stop-1) if res < 0 else \
         binary_search_img(start, mid-1, f, steps_to_stop-1)
 # -
@@ -102,13 +112,13 @@ sz = 224  # transformed to this size
 # Making pretrained weights work without needing to find the default filename
 if not os.path.exists('/tmp/.cache/torch/checkpoints/'):
     os.makedirs('/tmp/.cache/torch/checkpoints/')
-get_ipython().system("cp '../input/resnet50/resnet50.pth' '/tmp/.cache/torch/checkpoints/resnet50-19c8e357.pth'")
+get_ipython().system(
+    "cp '../input/resnet50/resnet50.pth' '/tmp/.cache/torch/checkpoints/resnet50-19c8e357.pth'")
 
 os.listdir('../input')
 # -
 
 # +
-import pdb
 #import torchsnooper
 #import pysnooper
 
@@ -128,7 +138,9 @@ def prepare_for_party():
         SEED = 999
         seed_everything(SEED)
 
+
 prepare_for_party()
+
 
 def check_image_list_dist(subfolder):
     path_data = Path('../input/aptos2019-blindness-detection')
@@ -142,10 +154,11 @@ def check_image_list_dist(subfolder):
         stat = img_size_stats.setdefault(s, 0)
         img_size_stats[s] = stat + 1
         if s[0] == 480:
-            bc=get_diag_black_cnt(img)
+            bc = get_diag_black_cnt(img)
             target_blk.append(bc)
             print(bc)
     return img_size_stats, target_blk
+
 
 test_img_size_stats = {(1958, 2588): 134,
                        (480, 640): 1403,  # 3/4
@@ -186,13 +199,16 @@ train_img_size_stats = {(2136, 3216): 410,
 # 2. find the center
 # 3. use 3/4 crop, binarysearch, until the black margin we wanted is got (we can count the black pixels around the diagonal)
 # 4. done
+
+
 def get_diag_black_cnt(img):
     assert img.data.dtype == torch.float32
     img_r = img.data[0]  # only need to look R channle, most information
 
     thresh = img_r.mean()/10  # in tensor the value is in range 0 ~ 1
+
     def blk_cnt(t):
-        return sum((dig<thresh).sum() for dig in [t.diagonal(),t.diagonal(offset=5),t.diagonal(offset=-5)])
+        return sum((dig < thresh).sum() for dig in [t.diagonal(), t.diagonal(offset=5), t.diagonal(offset=-5)])
     img_r_flip = img_r.flip((1))
 
     return blk_cnt(img_r) + blk_cnt(img_r_flip)
@@ -204,8 +220,9 @@ def get_tensor_diag_black_cnt(img):
     img_r = img[0]  # only need to look R channle, most information
 
     thresh = img_r.mean()/10  # in tensor the value is in range 0 ~ 1
+
     def blk_cnt(t):
-        return sum((dig<thresh).sum() for dig in [t.diagonal(),t.diagonal(offset=5),t.diagonal(offset=-5)])
+        return sum((dig < thresh).sum() for dig in [t.diagonal(), t.diagonal(offset=5), t.diagonal(offset=-5)])
     img_r_flip = img_r.flip((1))
 
     return blk_cnt(img_r) + blk_cnt(img_r_flip)
@@ -214,7 +231,8 @@ def get_tensor_diag_black_cnt(img):
 def fastai_img_2_cv2(img): return (image2np(img.data)*255).astype(np.uint8)
 
 
-def find_center(image, cnt_thresh=20):  # return list, need to post process, should be around center
+# return list, need to post process, should be around center
+def find_center(image, cnt_thresh=20):
     """ Thanks to https://www.pyimagesearch.com/2016/02/01/opencv-center-of-contour/ """
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -227,7 +245,7 @@ def find_center(image, cnt_thresh=20):  # return list, need to post process, sho
     cs = []
     clen = np.array([len(c) for c in cnts])
     mid = np.argmax(clen)
-    
+
     for c in [cnts[mid]]:
         # compute the center of the contour
         if len(c) < 5:
@@ -250,14 +268,15 @@ def find_DR_center(img, thresh=20):
     return None, None, None
 
 
-def find_box_from_center(img, ratio=3/4, bc=137.774, bc_std=3.369, thresh=20):  # should put in a class
+# should put in a class
+def find_box_from_center(img, ratio=3/4, bc=137.774, bc_std=3.369, thresh=20):
     """ratio here, 3 height - 4 width (3y, 4x)
     """
     h, w = img.size
 
     def contour_range(cx, cy, c):
-        xs = c[:,0,0]
-        ys = c[:,0,1]
+        xs = c[:, 0, 0]
+        ys = c[:, 0, 1]
         xs_rel = xs - cx
         ys_rel = ys - cy
         ratio = xs_rel*3 - ys_rel*4  # minimum one
@@ -271,17 +290,19 @@ def find_box_from_center(img, ratio=3/4, bc=137.774, bc_std=3.369, thresh=20):  
                 xid_d = i
                 break
         if xid_d is None:
-            raise RuntimeError("Image Strange, cannot find right contour points")
+            raise RuntimeError(
+                "Image Strange, cannot find right contour points")
         c1, c2 = (xs[xid], ys[xid]), (xs[xid_d], ys[xid_d])
         if c1[0]*c1[1] > c2[0]*c2[0]:
             c2, c1 = c1, c2
         return xs.max(), xs.min(), ys.max(), ys.min(), c1, c2
 
     cx, cy, c = find_DR_center(img, thresh=thresh)
-    if cx is None: return None
+    if cx is None:
+        return None
     xmax, xmin, ymax, ymin, cross, cross2 = contour_range(cx, cy, c)
 
-    def find_box_from_cross_points(c1,c2, ratio, expand=28/400):
+    def find_box_from_cross_points(c1, c2, ratio, expand=28/400):
         # for 480*640, 137.7 ... we just test more times...
         #138/6 = 23, and the r is around 480/2/3*5 = 800/2=400, so it is about 25/400 more
         # so for h,w, both add these
@@ -295,26 +316,27 @@ def find_box_from_center(img, ratio=3/4, bc=137.774, bc_std=3.369, thresh=20):  
         c1[1] -= hight_e
         c2[1] += hight_e
         return c1, c2
-    def clip(h,w, c):
-        x=c[0]
-        y=c[1]
+
+    def clip(h, w, c):
+        x = c[0]
+        y = c[1]
         x = x if x > 0 else 0
         y = y if y > 0 else 0
         x = x if x < w else w
         y = y if y < h else h
         return x, y
-    c1,c2 = find_box_from_cross_points(list(cross), list(cross2), ratio)
-    c1 = clip(h,w,c1)
-    c2 = clip(h,w,c2)
+    c1, c2 = find_box_from_cross_points(list(cross), list(cross2), ratio)
+    c1 = clip(h, w, c1)
+    c2 = clip(h, w, c2)
 
-    bbox = [c1[1], c1[0],c2[1], c2[0]]
+    bbox = [c1[1], c1[0], c2[1], c2[0]]
 
-    cnt = get_tensor_diag_black_cnt(img.data[:,c1[1]:c2[1],c1[0]:c2[0]])
+    cnt = get_tensor_diag_black_cnt(img.data[:, c1[1]:c2[1], c1[0]:c2[0]])
     print(cnt)
     if cnt == 0:
         print("Image Strange, cannot find black points in diagonals")
 
-    return ImageBBox.create(h,w, [bbox], labels=[0], classes=['ROI']), bbox
+    return ImageBBox.create(h, w, [bbox], labels=[0], classes=['ROI']), bbox
     #ch = cy
     #cw = cx
     #h_range = min(ch-ymin, ymax-ch)  # half box height up limit
@@ -342,13 +364,16 @@ def find_box_from_center(img, ratio=3/4, bc=137.774, bc_std=3.369, thresh=20):  
     # easier way, just use the cross points, and add a few pixel margin
     #w_ = int(h_proposed * 4/3)
     #w_ = w_ if w_ < w_range else w_range
-    # top left bottem rightb    
+    # top left bottem rightb
     #return ImageBBox.create(h,w, [[ch-h_proposed, cw-w_, ch+h_proposed, cw+w_]], labels=[0], classes=['ROI']), [ch-h_proposed, cw-w_, ch+h_proposed, cw+w_]
     #return [ch-h_proposed, cw-w_, ch+h_proposed, cw+w_]
 
+
 # -
 # +
-errorsones=[]  # to put together and need to handle later
+errorsones = []  # to put together and need to handle later
+
+
 def check_crop(subfolder):
     path_data = Path('../input/aptos2019-blindness-detection')
     cwd = Path('.')
@@ -360,13 +385,13 @@ def check_crop(subfolder):
     to_save_path_resized.mkdir()
     to_save_path.mkdir()
 
-    cotinue_f=False
+    cotinue_f = False
     for i, img in enumerate(il):
         fname = il.items[i]
         name_before_resize = to_save_path/fname.name
         name_after_resize = to_save_path_resized/fname.name
 
-        if fname.name != '81914ceb4e74.png' and cotinue_f: 
+        if fname.name != '81914ceb4e74.png' and cotinue_f:
             continue
         if cotinue_f:
             cotinue_f = False
@@ -377,7 +402,8 @@ def check_crop(subfolder):
             try:
                 _, coords = find_box_from_center(img)
                 print(coords, name_before_resize)
-                pilimg=topil(img.data[:,coords[0]:coords[2],coords[1]:coords[3]])
+                pilimg = topil(
+                    img.data[:, coords[0]:coords[2], coords[1]:coords[3]])
                 pilimg.save(name_before_resize)
                 pilimg_r = pilimg.resize((640, 480))  # weight, height
                 pilimg_r.save(name_after_resize)
@@ -391,10 +417,13 @@ def check_crop(subfolder):
         else:
             copyfile(fname, name_before_resize)
             copyfile(fname, name_after_resize)
-from tqdm import tqdm
-errorsones=[]  # to put together and need to handle later
+
+
+errorsones = []  # to put together and need to handle later
+
+
 def check_crop_namelist(ns):
-    subfolder='train_images'
+    subfolder = 'train_images'
     path_data = Path('../input/aptos2019-blindness-detection')/subfolder
     cwd = Path('.')
     topil = ToPILImage()
@@ -413,9 +442,11 @@ def check_crop_namelist(ns):
         s = tuple(img.size)
         if s[0] != 480:
             try:
-                _, coords = find_box_from_center(img, thresh=10)  # use small thresh, maybe helpful -> much better
+                # use small thresh, maybe helpful -> much better
+                _, coords = find_box_from_center(img, thresh=10)
                 print(coords, name_before_resize)
-                pilimg=topil(img.data[:,coords[0]:coords[2],coords[1]:coords[3]])
+                pilimg = topil(
+                    img.data[:, coords[0]:coords[2], coords[1]:coords[3]])
                 pilimg.save(name_before_resize)
                 pilimg_r = pilimg.resize((640, 480))  # weight, height
                 pilimg_r.save(name_after_resize)
@@ -430,42 +461,44 @@ def check_crop_namelist(ns):
             copyfile(fname, name_before_resize)
             copyfile(fname, name_after_resize)
 
+
 still_need_to_handle = [
- '033f2b43de6d.png',
- '3a6e9730b298.png',
- 'df4913ca3712.png',
- 'f002ce614c59.png',
- '4860f7813654.png',
- 'ac720570dd0f.png',
- '807135cbc438.png',
- 'e1418d28d668.png',
- '42a67337fa8e.png',
- '17d997fe1090.png',
- '64fedbf97473.png',
- 'd51b3fe0fa1b.png',
- '6f4719c6bb4b.png',
- 'c58971bcebb2.png',
- '5548a7961a3e.png',
- '7214fc7cbe03.png',
- '7269a1d84a57.png',
- '2c77bf969079.png',
- 'e821c1b6417a.png',
- 'b665041e1633.png',
- '417f408ee8e0.png',
- '6b7cf869622a.png',
- '66d2ca47aa44.png',
- '6cb96a6fb029.png',
- '50d8a8fb7737.png',
- '541db13517e2.png',
- '5b301a6d1ac7.png',
- 'f64214bed40e.png',
- '2bb3c492d6d3.png']
+    '033f2b43de6d.png',
+    '3a6e9730b298.png',
+    'df4913ca3712.png',
+    'f002ce614c59.png',
+    '4860f7813654.png',
+    'ac720570dd0f.png',
+    '807135cbc438.png',
+    'e1418d28d668.png',
+    '42a67337fa8e.png',
+    '17d997fe1090.png',
+    '64fedbf97473.png',
+    'd51b3fe0fa1b.png',
+    '6f4719c6bb4b.png',
+    'c58971bcebb2.png',
+    '5548a7961a3e.png',
+    '7214fc7cbe03.png',
+    '7269a1d84a57.png',
+    '2c77bf969079.png',
+    'e821c1b6417a.png',
+    'b665041e1633.png',
+    '417f408ee8e0.png',
+    '6b7cf869622a.png',
+    '66d2ca47aa44.png',
+    '6cb96a6fb029.png',
+    '50d8a8fb7737.png',
+    '541db13517e2.png',
+    '5b301a6d1ac7.png',
+    'f64214bed40e.png',
+    '2bb3c492d6d3.png']
 #check_crop_namelist(still_need_to_handle)
 # -
 
 
 def prepare_train_dev_df(df, cls_overlap="None_for_fine"):
-    df['path'] = df['id_code'].map(lambda x: os.path.join(train_dir, '{}.png'.format(x)))
+    df['path'] = df['id_code'].map(
+        lambda x: os.path.join(train_dir, '{}.png'.format(x)))
     df = df.drop(columns=['id_code'])
     df = df.sample(frac=1).reset_index(drop=True)  # shuffle dataframe
     #['normal', 'NPDR_1', 'NPDR_2', 'NPDR_3', 'PDR']
@@ -475,13 +508,15 @@ def prepare_train_dev_df(df, cls_overlap="None_for_fine"):
     df['val'] = False
     for i in range(5):
         name = f'DR_{i}'
-        val_sub_part = (df[name][df[name]==1]).sample(frac=0.2, replace=False)
+        val_sub_part = (df[name][df[name] == 1]).sample(
+            frac=0.2, replace=False)
         df.loc[val_sub_part.index, 'val'] = True
 
     if cls_overlap == 'None_for_fine':  # to preserve more information
         pass
     else:
-        df['DR_3'][df['diagnosis'] == 4] = 1  # could use label smooth, or mixup
+        # could use label smooth, or mixup
+        df['DR_3'][df['diagnosis'] == 4] = 1
         df['DR_1'][df['DR_2'] == 1] = 1
         df['DR_1'][df['DR_3'] == 1] = 1
         df['DR_2'][df['DR_3'] == 1] = 1
@@ -528,11 +563,10 @@ def replace_image_cropped(df, from_folder, to_folder):
     return df[~df['path'].str.contains('f62b8a076833')]
 
 
-
 df = replace_image_cropped(df,
-    'aptos2019-blindness-detection/train_images',
-    #'dr-cropped/dr_train_images_cropped_resized/train_images_cropped_resized')
-    'dr-cropped/dr_train_images_cropped')
+                           'aptos2019-blindness-detection/train_images',
+                           #'dr-cropped/dr_train_images_cropped_resized/train_images_cropped_resized')
+                           'dr-cropped/dr_train_images_cropped')
 
 
 # This is actually very small. The [previous competition](https://kaggle.com/c/diabetic-retinopathy-detection) had ~35k images, which supports the idea that pretraining on that dataset may be quite beneficial.
@@ -542,7 +576,6 @@ df = replace_image_cropped(df,
 df['diagnosis'].hist(figsize=(10, 5))  # so might be overfitting!!!
 
 # Let's look at an example image:
-from PIL import Image
 
 im = Image.open(df['path'][0])
 width, height = im.size
@@ -551,25 +584,31 @@ print("1st image size: ", width, height)
 # -
 
 # +
+
+
 class CategoryWithScoreProcessor(MultiCategoryProcessor):
     "`PreProcessor` that create `classes` from `ds.items` and handle the mapping."
-    def __init__(self, ds: ItemList, one_hot: bool=False):
+
+    def __init__(self, ds: ItemList, one_hot: bool = False):
         super(CategoryWithScoreProcessor, self).__init__(ds, one_hot)
 
     def process_one(self, item):
-        if self.one_hot or isinstance(item, EmptyLabel): return item
+        if self.one_hot or isinstance(item, EmptyLabel):
+            return item
         return item.astype(np.int)
 
     def generate_classes(self, items):
         "Generate classes from `items` by taking the sorted unique values."
-        raise RuntimeError('For DR, we handle differently, so we don\'t use this function.')
+        raise RuntimeError(
+            'For DR, we handle differently, so we don\'t use this function.')
 
 
 class DRCategory(Category):
     """
     DRCategory just save the raw data as index
     """
-    def __int__(self):  return int(self.data[-1])
+
+    def __int__(self): return int(self.data[-1])
 
 
 class DRCategoryListWithScore(MultiCategoryList):
@@ -579,20 +618,22 @@ class DRCategoryListWithScore(MultiCategoryList):
     """
     _processor = CategoryWithScoreProcessor
 
-    def __init__(self, items:Iterator, classes:Collection=None, label_delim:str=None, one_hot:bool=False, **kwargs):
-        super().__init__(items, classes=classes, label_delim=label_delim,one_hot=one_hot, **kwargs)
+    def __init__(self, items: Iterator, classes: Collection = None, label_delim: str = None, one_hot: bool = False, **kwargs):
+        super().__init__(items, classes=classes,
+                         label_delim=label_delim, one_hot=one_hot, **kwargs)
         #self.loss_func = BCEWithLogitsFlat()
         #self.one_hot = one_hot
         #self.copy_new += ['one_hot']
         self.loss_func = None
-        self.thresholds = [0.5, 1.5, 2.5, 3.5]    
+        self.thresholds = [0.5, 1.5, 2.5, 3.5]
 
     def set_thresholds(self, thresholds):
         self.thresholds = thresholds
 
     def get(self, i):
         o = self.items[i]
-        if o is None: return None
+        if o is None:
+            return None
         return DRCategory(o, self.classes[o[-1]])
 
     def analyze_pred(self, pred, thresh: float = 0.):
@@ -607,12 +648,12 @@ class DRCategoryListWithScore(MultiCategoryList):
         #p[coarse_predict] = 1.
         #if coarse_predict == 1:  # NPDR
         #    fine_predict = pred[3:6].argmax()
-        #    #type_pred = fine_predict + 1  
+        #    #type_pred = fine_predict + 1
         #    # todo use reg value to analyze. but need to know the threshold
         #    p[3+fine_predict] = 1.
         #return p
         #else:
-            #type_pred = coarse_predict if coarse_predict == 0 else 4
+        #type_pred = coarse_predict if coarse_predict == 0 else 4
         #    return p[]
 
     def reconstruct(self, t):
@@ -631,7 +672,7 @@ class DRCategoryListWithScore(MultiCategoryList):
         # coarse_predict = t[:3].argmax()
         # if coarse_predict == 1:  # NPDR
         #     fine_predict = t[3:6].argmax()
-        #     type_pred = fine_predict + 1  
+        #     type_pred = fine_predict + 1
         # else:
         #     type_pred = coarse_predict if coarse_predict == 0 else 4
 
@@ -639,10 +680,13 @@ class DRCategoryListWithScore(MultiCategoryList):
 # -
 # +
 
+
 src = (ImageList.from_df(df=df, path='./', cols='path')  # get dataset from dataset
-        .split_by_idx(df[df['val']==1].index.tolist())  # Splitting the dataset
-        .label_from_df(cols=['DRC_0', 'DRC_1', 'DRC_2', 'DR_1', 'DR_2', 'DR_3', 'NPDR_score'], label_cls=partial(DRCategoryListWithScore, classes=['normal', 'NPDR_1', 'NPDR_2', 'NPDR_3', 'PDR'], one_hot=False))  # obtain labels from the level column
-       ) # LabelList = ImageList + LabelList
+       # Splitting the dataset
+       .split_by_idx(df[df['val'] == 1].index.tolist())
+       # obtain labels from the level column
+       .label_from_df(cols=['DRC_0', 'DRC_1', 'DRC_2', 'DR_1', 'DR_2', 'DR_3', 'NPDR_score'], label_cls=partial(DRCategoryListWithScore, classes=['normal', 'NPDR_1', 'NPDR_2', 'NPDR_3', 'PDR'], one_hot=False))
+       )  # LabelList = ImageList + LabelList
 twenty_per_size = int(df['val'].sum())
 val_bs = twenty_per_size if twenty_per_size < 800 else 512
 
@@ -652,6 +696,7 @@ tfms = get_transforms(do_flip=True, flip_vert=True, max_rotate=180, max_warp=Non
 data = (src.transform(tfms, size=sz, resize_method=ResizeMethod.CROP, padding_mode='reflection')  # Data augmentation
         .databunch(bs=bs, val_bs=val_bs, num_workers=2)  # DataBunch
         )
+
 
 def get_train_stats(databunch):
     """
@@ -669,10 +714,11 @@ def get_train_stats(databunch):
         n += b_n
         # need to record E(X^2) and E(X), for x^2
         stats[0] += x.mean(dim=(0, 2, 3))*b_n
-        stats[1] += x.std (dim=(0, 2, 3))*b_n
+        stats[1] += x.std(dim=(0, 2, 3))*b_n
         print(stats)
     stats /= n
     return stats
+
 
 #stats = ([0.4285, 0.2286, 0.0753], [0.2700, 0.1485, 0.0812])  # before crop
 stats = ([0.5744, 0.3018, 0.0930], [0.1676, 0.1002, 0.0805])  # after crop
@@ -683,14 +729,16 @@ if stats is None:
 
 DR_img_stats = stats
 #imagenet_stats is very different
-data = data.normalize((DR_img_stats[0], DR_img_stats[1]))  # Normalize just to mean, std of the data, as it is way too different with imagenet
+# Normalize just to mean, std of the data, as it is way too different with imagenet
+data = data.normalize((DR_img_stats[0], DR_img_stats[1]))
 # this operation will add a transform to data pipeline
 # -
 
-data.show_batch(rows=3, figsize=(7,6))
+data.show_batch(rows=3, figsize=(7, 6))
 
 # +
-train_dev_ratio = len(data.dl(DatasetType.Train).x) / len(data.dl(DatasetType.Valid).x)
+train_dev_ratio = len(data.dl(DatasetType.Train).x) / \
+    len(data.dl(DatasetType.Valid).x)
 assert 3.9 < train_dev_ratio < 4.1  # make sure it splits correctly
 # -
 
@@ -726,17 +774,21 @@ class OptimizedRounder(object):
                 X_p[i] = 4
         sample_weight = y.new_zeros(y.size(), dtype=torch.float)
         reg_predict = y.clone().detach()
-        inds = [torch.nonzero(reg_predict == type_id).squeeze(1) for type_id in range(5)]
+        inds = [torch.nonzero(reg_predict == type_id).squeeze(1)
+                for type_id in range(5)]
         for type_id, ind in enumerate(inds):
             sample_weight[ind] = cls_weight[type_id]
 
-        ll = cohen_kappa_score(y, X_p, weights='quadratic', sample_weight=sample_weight)
+        ll = cohen_kappa_score(y, X_p, weights='quadratic',
+                               sample_weight=sample_weight)
         return -ll
 
     def fit(self, X, y, cls_weight):
-        loss_partial = partial(self._kappa_loss, X=X, y=y, cls_weight=cls_weight)
+        loss_partial = partial(self._kappa_loss, X=X,
+                               y=y, cls_weight=cls_weight)
         initial_coef = [0.5, 1.5, 2.5, 3.5]
-        self.coef_ = sp.optimize.minimize(loss_partial, initial_coef, method='nelder-mead')
+        self.coef_ = sp.optimize.minimize(
+            loss_partial, initial_coef, method='nelder-mead')
         print(-loss_partial(self.coef_['x']))
 
     def predict(self, X, coef):
@@ -760,7 +812,10 @@ class OptimizedRounder(object):
 # -
 
 # +
-def convert_to_normal_pred(pred, thresholds):  # for batched data, still is the batch size, (64,7)
+
+
+# for batched data, still is the batch size, (64,7)
+def convert_to_normal_pred(pred, thresholds):
     thresh_for_PDR = 3.
 
     if len(pred.shape) == 1:
@@ -799,7 +854,8 @@ def convert_to_normal_pred(pred, thresholds):  # for batched data, still is the 
         #PDR_subset = torch.nonzero((PDR_logit > 0) * (reg_value > thresh_for_PDR)).squeeze(1)
         #predict[PDR_subset] = 4
         reg_predict = pred[:, -1].clone().detach()
-        inds = [torch.nonzero(reg_predict > thr).squeeze(1) for thr in thresholds]
+        inds = [torch.nonzero(reg_predict > thr).squeeze(1)
+                for thr in thresholds]
         predict = reg_predict.new_zeros(reg_predict.size(), dtype=torch.int64)
         for type, ind in enumerate(inds):
             predict[ind] = type+1
@@ -826,7 +882,8 @@ def quadratic_kappa(y_hat, y, cls_weight=None, y_hat_predicted=False):
 
     if cls_weight is not None:
         reg_predict = y.clone().detach()
-        inds = [torch.nonzero(reg_predict == type_id).squeeze(1) for type_id in range(5)]
+        inds = [torch.nonzero(reg_predict == type_id).squeeze(1)
+                for type_id in range(5)]
         for type_id, ind in enumerate(inds):
             sample_weight[ind] = cls_weight[type_id]
 
@@ -868,11 +925,12 @@ class DR_FocalLoss(nn.Module):
         s = normal_cnt + NPDR_1_cnt + NPDR_2_cnt + NPDR_3_cnt + PDR_cnt
         fine_s = NPDR_1_cnt + NPDR_2_cnt + NPDR_3_cnt
 
-        def cal_neg_coef(a,b,c, s=None):  # s can be passed if there is overlay in abc
-            if s is None: s = a + b + c
+        def cal_neg_coef(a, b, c, s=None):  # s can be passed if there is overlay in abc
+            if s is None:
+                s = a + b + c
             return [a/(s-a), b/(s-b), c/(s-c)]
 
-        def cal_ratio(a,b,c,d):  # s can be passed if there is overlay in abc
+        def cal_ratio(a, b, c, d):  # s can be passed if there is overlay in abc
             return [a/b, a/c, a/d]
 
         #b_n_r, b_npdr_r, b_pdr_r = cal_ratio(normal_cnt, normal_cnt, fine_s, PDR_cnt)
@@ -902,13 +960,15 @@ class DR_FocalLoss(nn.Module):
         self.coarse_a = \
             cal_neg_coef(normal_cnt, NPDR_cnt_added_PDR, PDR_cnt, s)
         self.fine_a = \
-            cal_neg_coef(NPDR_1_added, NPDR_2_added, NPDR_3_added, NPDR_cnt_added_PDR)
+            cal_neg_coef(NPDR_1_added, NPDR_2_added,
+                         NPDR_3_added, NPDR_cnt_added_PDR)
         # only used in balancing classification
         self.fine_mag = \
             cal_ratio(base_cnt, NPDR_1_added, NPDR_2_added, NPDR_3_added)
 
         print('mag coef: ',
-              [self.coarse_mag[0]] + self.fine_mag_not_added + [self.coarse_mag[-1]],
+              [self.coarse_mag[0]] + self.fine_mag_not_added +
+              [self.coarse_mag[-1]],
               "\nalpha balancer here will be multiplied by negtive loss part\n",
               self.coarse_a, self.fine_a, self.fine_mag)
 
@@ -933,7 +993,7 @@ class DR_FocalLoss(nn.Module):
 
         # todo add loss/constraint for NPDR,PDR classfication? might be helpful, after we analyze our errors!!
         coarse_cls_loss = self.focal_binary_loss(coarse_cls_input, coarse_target, self.gamma, self.coarse_a, self.eps,
-                                      self.coarse_mag, reduction=reduction_param)
+                                                 self.coarse_mag, reduction=reduction_param)
         if reduction_param == 'none':  # need to squash for coarse and fine classes
             coarse_cls_loss = coarse_cls_loss.sum(dim=1)
 
@@ -943,7 +1003,7 @@ class DR_FocalLoss(nn.Module):
         fine_cls_input = cls_input[NPDR_inds_subset, 3:6]
         fine_target = target[NPDR_inds_subset, 3:6]
         fine_cls_loss = self.focal_binary_loss(fine_cls_input, fine_target, self.gamma, self.fine_a, self.eps, self.fine_mag,
-                                       reduction=reduction_param)
+                                               reduction=reduction_param)
         if reduction_param == 'none':  # need to squash for coarse and fine classes
             fine_cls_loss = fine_cls_loss.sum(dim=1)
             loss[NPDR_inds_subset] += fine_cls_loss  # size ...
@@ -951,7 +1011,8 @@ class DR_FocalLoss(nn.Module):
             loss += fine_cls_loss  # a value
 
         # for reg loss, we do class balance too
-        reg_loss = self.reg_mag * F.smooth_l1_loss(reg_score_pred, target[:, -1], reduction='none')
+        reg_loss = self.reg_mag * \
+            F.smooth_l1_loss(reg_score_pred, target[:, -1], reduction='none')
 
         NPDR1_inds_subset = torch.nonzero(target[:, -1] == 1).squeeze(1)
         NPDR2_inds_subset = torch.nonzero(target[:, -1] == 2).squeeze(1)
@@ -967,7 +1028,8 @@ class DR_FocalLoss(nn.Module):
         reg_loss[PDR_inds_subset] *= self.coarse_mag[-1]
 
         if reduction_param != 'none':
-            reg_loss = torch.mean(reg_loss) if reduction_param == 'mean' else torch.sum(reg_loss)
+            reg_loss = torch.mean(
+                reg_loss) if reduction_param == 'mean' else torch.sum(reg_loss)
         loss += reg_loss
 
         return loss
@@ -993,12 +1055,14 @@ class DR_FocalLoss(nn.Module):
             neg_gamma_balancer = y_pred ** gamma
 
         # RuntimeError: expected backend CUDA and dtype Float but got backend CUDA and dtype Long
-        loss = -                       pos_gamma_balancer * y * torch.log(y_pred)  # cross entropy
-        loss += -y.new_tensor(alpha) * neg_gamma_balancer * not_y * torch.log(not_y_pred)
+        loss = -                       pos_gamma_balancer * \
+            y * torch.log(y_pred)  # cross entropy
+        loss += -y.new_tensor(alpha) * neg_gamma_balancer * \
+            not_y * torch.log(not_y_pred)
         loss *= loss.new_tensor(mag)
 
         #if target.requires_grad:  # we don't care about this, so just ignore
-        
+
         if reduction != 'none':
             return torch.mean(loss) if reduction == 'mean' else torch.sum(loss)
         #else:
@@ -1016,19 +1080,22 @@ class DR_FocalLoss(nn.Module):
 # **Training:**
 #
 # We use transfer learning, where we retrain the last layers of a pretrained neural network. I use the ResNet50 architecture trained on the ImageNet dataset, which has been commonly used for pre-training applications in computer vision. Fastai makes it quite simple to create a model and train:
-def create_DR_head(nf:int, nc:int, lin_ftrs:Optional[Collection[int]]=None, ps:Floats=0.5,
-                   concat_pool:bool=True, bn_final:bool=False):
+def create_DR_head(nf: int, nc: int, lin_ftrs: Optional[Collection[int]] = None, ps: Floats = 0.5,
+                   concat_pool: bool = True, bn_final: bool = False):
     "Model head that takes `nf` features, runs through `lin_ftrs`, and about `nc` classes."
     lin_ftrs = [nf, 512, nc] if lin_ftrs is None else [nf] + lin_ftrs + [nc]
     ps = listify(ps)
-    if len(ps) == 1: ps = [ps[0]/2] * (len(lin_ftrs)-2) + ps
+    if len(ps) == 1:
+        ps = [ps[0]/2] * (len(lin_ftrs)-2) + ps
     actns = [nn.ReLU(inplace=True)] * (len(lin_ftrs)-2) + [None]
     pool = AdaptiveConcatPool2d() if concat_pool else nn.AdaptiveAvgPool2d(1)
     layers = [pool, Flatten()]
-    for ni,no,p,actn in zip(lin_ftrs[:-1], lin_ftrs[1:], ps, actns):
+    for ni, no, p, actn in zip(lin_ftrs[:-1], lin_ftrs[1:], ps, actns):
         layers += bn_drop_lin(ni, no, True, p, actn)
-    if bn_final: layers.append(nn.BatchNorm1d(lin_ftrs[-1], momentum=0.01))
+    if bn_final:
+        layers.append(nn.BatchNorm1d(lin_ftrs[-1], momentum=0.01))
     return nn.Sequential(*layers)
+
 
 def DR_learner(data: DataBunch, base_arch: Callable, cut: Union[int, Callable] = None, pretrained: bool = True,
                lin_ftrs: Optional[Collection[int]] = None, ps: Floats = 0.5, custom_head: Optional[nn.Module] = None,
@@ -1040,10 +1107,12 @@ def DR_learner(data: DataBunch, base_arch: Callable, cut: Union[int, Callable] =
     "Create custom convnet architecture"
     body = create_body(base_arch, pretrained, cut)
     if custom_head is None:  # quadnet head
-        nf = num_features_model(nn.Sequential(*body.children())) * (2 if concat_pool else 1)
+        nf = num_features_model(nn.Sequential(
+            *body.children())) * (2 if concat_pool else 1)
         if attention:
             pass
-        head = create_DR_head(nf, data.c+2, lin_ftrs, ps=ps, concat_pool=concat_pool, bn_final=bn_final)
+        head = create_DR_head(nf, data.c+2, lin_ftrs, ps=ps,
+                              concat_pool=concat_pool, bn_final=bn_final)
     else:
         head = custom_head
 
@@ -1051,15 +1120,18 @@ def DR_learner(data: DataBunch, base_arch: Callable, cut: Union[int, Callable] =
 
     learn = Learner(data, model, **kwargs)
     learn.split(split_on or meta['split'])
-    if pretrained: learn.freeze()
-    if init: apply_init(model[1], init)
+    if pretrained:
+        learn.freeze()
+    if init:
+        apply_init(model[1], init)
     return learn
 # -
 
 
 # +
 cls_cnt = df['diagnosis'].value_counts().sort_index().values
-fl_normal = DR_FocalLoss(gamma=0., cls_cnt=cls_cnt)  # changed lr decay 2/0.15 + patience=3, do not use focal loss...
+# changed lr decay 2/0.15 + patience=3, do not use focal loss...
+fl_normal = DR_FocalLoss(gamma=0., cls_cnt=cls_cnt)
 # set_trace() we convert back to ipynb
 # learner = DR_learner(data, vision.models.densenet121, metrics=[quadratic_kappa])
 #learn = cnn_learner(data, base_arch=models.resnet50, metrics=[quadratic_kappa])
@@ -1113,11 +1185,12 @@ def train_triangular_lr(learn, inner_step=0, cycle_cnt=None, max_lr=None, loss=N
         #learn.fit_one_cycle(6, max_lr=slice(1e-6, 5e-6/5))
         learn.unfreeze()
         learn.fit_one_cycle(cycle_cnt, max_lr=max_lr, wd=0.1)
-    
+
         learn.recorder.plot_losses()
         learn.recorder.plot_metrics()
         learn.save('dr-stage2')
 # -
+
 
 # +
 savedPath = Path('models/stage-2.pth')
@@ -1131,8 +1204,6 @@ if savedPath.exists():
 # !chmod +x log_tel.sh
 # #!nc -h || apt install netcat -y
 
-from io import StringIO
-from subprocess import Popen, PIPE
 
 #cmdstr = 'python -m unittest unitTest.PSKenelTest.test_pytorch_model_dev'
 cmdstr = 'sh ./log_tel.sh'
@@ -1145,6 +1216,8 @@ if submitting_to_LB and do_lr_find:
 # -
 
 # +
+
+
 def get_max_lr(learn):
     try:
         rec = learn.recorder
@@ -1160,6 +1233,7 @@ def get_max_lr(learn):
         return None
 # -
 
+
 # +
 stage_1_cycle = 4 if not use_less_train_data else 1
 
@@ -1169,15 +1243,16 @@ if submitting_to_LB and do_lr_find:
 
 if max_lr_stage_1 is None or max_lr_stage_1 < 5e-4:
     max_lr_stage_1 = 1e-2
-train_triangular_lr(learn, inner_step=1, cycle_cnt=stage_1_cycle, max_lr=max_lr_stage_1)  # choose 3.31E-02 as suggested
+train_triangular_lr(learn, inner_step=1, cycle_cnt=stage_1_cycle,
+                    max_lr=max_lr_stage_1)  # choose 3.31E-02 as suggested
 # -
 
-# + 
+# +
 if submitting_to_LB and do_lr_find:
     train_triangular_lr(learn, inner_step=2)  # choose 3.31E-02 as suggested
 # -
 
-# + 
+# +
 stage_2_cycle = 6 if not use_less_train_data else 1
 
 max_lr_stage_2 = None
@@ -1189,22 +1264,25 @@ if max_lr_stage_2 is None or max_lr_stage_2 < 1e-6:
 last_layer_lr_scale_down = 10.
 
 last_layer_max_lr_stage_2 = max_lr_stage_1 / last_layer_lr_scale_down
-train_triangular_lr(learn, inner_step=3, cycle_cnt=stage_2_cycle, max_lr=slice(max_lr_stage_2, last_layer_max_lr_stage_2))
+train_triangular_lr(learn, inner_step=3, cycle_cnt=stage_2_cycle, max_lr=slice(
+    max_lr_stage_2, last_layer_max_lr_stage_2))
 # -
 
 # +
 # we need to subclass our our interpretor, as existed one use argmax to predict class
 
+
 class DRClassificationInterpretation(ClassificationInterpretation):
-    def __init__(self, learn:Learner, preds:Tensor, y_true:Tensor, losses:Tensor, ds_type:DatasetType=DatasetType.Valid, 
-                 cls_converter: Callable=None):
-        super(DRClassificationInterpretation, self).__init__(learn,preds,y_true,losses,ds_type)
+    def __init__(self, learn: Learner, preds: Tensor, y_true: Tensor, losses: Tensor, ds_type: DatasetType = DatasetType.Valid,
+                 cls_converter: Callable = None):
+        super(DRClassificationInterpretation, self).__init__(
+            learn, preds, y_true, losses, ds_type)
         assert cls_converter is not None
         self.pred_class = cls_converter(self.preds)
         self.y_true = self.y_true[:, -1]
 
     @classmethod
-    def from_learner(cls, learn: Learner,  ds_type:DatasetType=DatasetType.Valid, cls_converter: Callable=None):
+    def from_learner(cls, learn: Learner,  ds_type: DatasetType = DatasetType.Valid, cls_converter: Callable = None):
         "Gets preds, y_true, losses to construct base class from a learner"
         preds_res = learn.get_preds(ds_type=ds_type, with_loss=True)
         return cls(learn, *preds_res, cls_converter=cls_converter)
@@ -1212,8 +1290,10 @@ class DRClassificationInterpretation(ClassificationInterpretation):
 # +
 # Let's evaluate our model:
 
+
 coefficients = [0.5, 1.5, 2.5, 3.5]
-interp = DRClassificationInterpretation.from_learner(learn, cls_converter=partial(convert_to_normal_pred, thresholds=coefficients))
+interp = DRClassificationInterpretation.from_learner(
+    learn, cls_converter=partial(convert_to_normal_pred, thresholds=coefficients))
 
 # +
 losses, idxs = interp.top_losses()
@@ -1240,8 +1320,10 @@ interp.plot_confusion_matrix(figsize=(12, 12), dpi=98)
 
 # +
 # ## TTA
-# 
+#
 # Test-time augmentation, or TTA, is a commonly-used technique to provide a boost in your score, and is very simple to implement. Fastai already has TTA implemented, but it is not the best for all purposes, so I am redefining the fastai function and using my custom version.
+
+
 def _tta_only(learn: Learner, ds_type: DatasetType = DatasetType.Valid, num_pred: int = 10) -> Iterator[List[Tensor]]:
     "Computes the outputs for several augmented inputs for TTA"
     dl = learn.dl(ds_type)
@@ -1256,7 +1338,9 @@ def _tta_only(learn: Learner, ds_type: DatasetType = DatasetType.Valid, num_pred
     finally:
         ds.tfms = old
 
+
 Learner.tta_only = _tta_only
+
 
 def _TTA(learn: Learner, beta: float = 0, ds_type: DatasetType = DatasetType.Valid, num_pred: int = 1,
          with_loss: bool = False) -> Tensors:
@@ -1271,12 +1355,15 @@ def _TTA(learn: Learner, beta: float = 0, ds_type: DatasetType = DatasetType.Val
             final_preds = preds
         else:
             avg_preds = torch.stack(all_preds).mean(0)
-            all_preds = list(learn.tta_only(ds_type=ds_type, num_pred=num_pred))
+            all_preds = list(learn.tta_only(
+                ds_type=ds_type, num_pred=num_pred))
             final_preds = preds * beta + avg_preds * (1 - beta)
         if with_loss:
-            with NoneReduceOnCPU(learn.loss_func) as lf: loss = lf(final_preds, y)
+            with NoneReduceOnCPU(learn.loss_func) as lf:
+                loss = lf(final_preds, y)
             return final_preds, y, loss
         return final_preds, y
+
 
 Learner.TTA = _TTA
 # -
@@ -1298,7 +1385,8 @@ coefficients
 
 # +
 test_predictions = None
-sample_df = pd.read_csv('../input/aptos2019-blindness-detection/sample_submission.csv')
+sample_df = pd.read_csv(
+    '../input/aptos2019-blindness-detection/sample_submission.csv')
 
 
 def preds_for_test(learn, sample_df, optR, coefficients):
@@ -1312,8 +1400,10 @@ def preds_for_test(learn, sample_df, optR, coefficients):
 # -
 # +
 
+
 if submitting_to_LB:
-    if test_predictions is None: test_predictions = preds_for_test(learn, sample_df, optR, coefficients)
+    if test_predictions is None:
+        test_predictions = preds_for_test(learn, sample_df, optR, coefficients)
     sample_df.diagnosis = test_predictions.astype(int)
     sample_df.to_csv('submission.csv', index=False)
 
@@ -1321,13 +1411,18 @@ if submitting_to_LB:
 # -
 
 # +
+if submitting_to_LB:
+    sample_df.diagnosis.hist()
+# -
+
+# +
 # use coefficients to predict
 interp.pred_class = torch.tensor(optR.predict(interp.preds[:, -1],
-                                 coefficients).astype(np.int),
+                                              coefficients).astype(np.int),
                                  dtype=torch.int64)
 # -
 # +
 print(interp.confusion_matrix())
-print(quadratic_kappa(interp.pred_class, interp.y_true, cls_weight=cls_weight, y_hat_predicted=True))
+print(quadratic_kappa(interp.pred_class, interp.y_true,
+                      cls_weight=cls_weight, y_hat_predicted=True))
 # -
-
